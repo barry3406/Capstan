@@ -16,7 +16,7 @@ export { LlmMemoryReconciler, reconcileAndStore, parseReconcileResponse } from "
 export type {
   SmartAgent, SmartAgentConfig, SmartAgentHooks, SmartAgentMemoryConfig,
   AgentRunResult, AgentRunStatus, AgentCheckpoint,
-  LLMProvider, LLMMessage, LLMResponse, LLMStreamChunk, LLMOptions,
+  LLMProvider, LLMMessage, LLMContentPart, LLMResponse, LLMStreamChunk, LLMOptions,
   AgentTool, AgentTask, AgentTaskKind, AgentTaskExecutionContext,
   AgentToolCallRecord, AgentTaskCallRecord, ToolRequest,
   MemoryEntry, MemoryScope, MemoryBackend, MemoryEmbedder, MemoryAccessor,
