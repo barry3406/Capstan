@@ -1,5 +1,6 @@
 import type {
   LLMMessage,
+  LLMContentPart,
   AgentTool,
   AgentTask,
   AgentToolCallRecord,
@@ -9,8 +10,13 @@ import type {
 } from "../types.js";
 import type { CompactionState } from "./continuation.js";
 
+/** 把 goal(可能是多模态 content parts)取成纯文本 —— 用于 summary / memory 查询 / 事件展示。 */
+export function goalText(goal: string | LLMContentPart[]): string {
+  return typeof goal === "string" ? goal : goal.map((p) => (p.type === "text" ? p.text : "[image]")).join("");
+}
+
 export interface EngineState {
-  goal: string;
+  goal: string | LLMContentPart[];
   maxIterations: number;
   contextWindowSize: number;
   messages: LLMMessage[];
@@ -43,9 +49,9 @@ export interface EngineState {
 
 export function createEngineState(
   config: SmartAgentConfig,
-  goal: string,
+  goal: string | LLMContentPart[],
   checkpoint?: AgentCheckpoint,
-  resumeMessage?: string,
+  resumeMessage?: string | LLMContentPart[],
 ): EngineState {
   if (checkpoint) {
     const state: EngineState = {

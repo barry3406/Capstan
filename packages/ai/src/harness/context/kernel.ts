@@ -487,7 +487,7 @@ function buildRunSnapshot(
   const now = new Date().toISOString();
   return {
     id: runId,
-    goal: checkpoint.goal,
+    goal: typeof checkpoint.goal === "string" ? checkpoint.goal : checkpoint.goal.map((p) => (p.type === "text" ? p.text : "[image]")).join(""),
     status: statusFromCheckpointStage(getCheckpointStage(checkpoint), "running"),
     createdAt: now,
     updatedAt: now,

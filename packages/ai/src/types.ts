@@ -162,7 +162,7 @@ export type ModelFinishReason = "stop" | "tool_use" | "max_output_tokens" | "con
 // === Checkpoint ===
 export interface AgentCheckpoint {
   stage: "initialized" | "tool_result" | "task_wait" | "approval_required" | "paused" | "completed" | "max_iterations" | "canceled";
-  goal: string;
+  goal: string | LLMContentPart[];
   messages: LLMMessage[];
   iterations: number;
   toolCalls: AgentToolCallRecord[];
@@ -392,8 +392,8 @@ export type AgentEvent =
 
 // === Smart Agent Interface ===
 export interface SmartAgent {
-  run(goal: string): Promise<AgentRunResult>;
-  stream(goal: string): AsyncGenerator<AgentEvent, AgentRunResult, undefined>;
-  resume(checkpoint: AgentCheckpoint, message: string): Promise<AgentRunResult>;
-  resumeStream(checkpoint: AgentCheckpoint, message: string): AsyncGenerator<AgentEvent, AgentRunResult, undefined>;
+  run(goal: string | LLMContentPart[]): Promise<AgentRunResult>;
+  stream(goal: string | LLMContentPart[]): AsyncGenerator<AgentEvent, AgentRunResult, undefined>;
+  resume(checkpoint: AgentCheckpoint, message: string | LLMContentPart[]): Promise<AgentRunResult>;
+  resumeStream(checkpoint: AgentCheckpoint, message: string | LLMContentPart[]): AsyncGenerator<AgentEvent, AgentRunResult, undefined>;
 }

@@ -867,6 +867,22 @@ function responsesContentText(content: string | LLMContentPart[]): string {
   return content.map((p) => (p.type === "text" ? p.text : "")).join("");
 }
 
+/** Responses-API 输入内容部件:text → input_text,image → input_image(data URL)。
+ *  assistant 历史只回放 output_text(它不发图)。其余角色按 parts 逐个映射。 */
+function responsesContentParts(
+  role: string,
+  content: string | LLMContentPart[],
+): Array<Record<string, unknown>> {
+  if (role === "assistant") return [{ type: "output_text", text: responsesContentText(content) }];
+  if (typeof content === "string") return [{ type: "input_text", text: content }];
+  const parts: Array<Record<string, unknown>> = [];
+  for (const p of content) {
+    if (p.type === "text") parts.push({ type: "input_text", text: p.text });
+    else if (p.type === "image") parts.push({ type: "input_image", image_url: `data:${p.mediaType};base64,${p.data}` });
+  }
+  return parts.length ? parts : [{ type: "input_text", text: "" }];
+}
+
 /** Extract assistant text from a Responses payload (plain JSON or SSE). */
 /** 从 Responses 输出数组里提取原生 function_call(工具调用)。 */
 function extractResponsesToolCalls(
@@ -960,7 +976,7 @@ export function responsesProvider(config: {
         .filter((m) => m.role !== "system")
         .map((m) => ({
           role: m.role,
-          content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: responsesContentText(m.content) }],
+          content: responsesContentParts(m.role, m.content),
         }));
       const body: Record<string, unknown> = {
         model: options?.model ?? defaultModel,

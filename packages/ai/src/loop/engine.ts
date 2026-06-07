@@ -3,11 +3,12 @@ import type {
   AgentEvent,
   AgentRunResult,
   LLMMessage,
+  LLMContentPart,
   SmartAgentConfig,
 } from "../types.js";
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createEngineState, buildCheckpoint } from "./state.js";
+import { createEngineState, buildCheckpoint, goalText } from "./state.js";
 import { createToolCatalog } from "./tool-catalog.js";
 import { composeSystemPrompt } from "./prompt-composer.js";
 import { estimateTokens, snipMessages, microcompactMessages, clearStaleToolResults, autocompact } from "./compaction.js";
@@ -221,9 +222,9 @@ async function retrieveMemories(
  */
 export async function runSmartLoop(
   config: SmartAgentConfig,
-  goal: string,
+  goal: string | LLMContentPart[],
   checkpoint?: AgentCheckpoint,
-  resumeMessage?: string,
+  resumeMessage?: string | LLMContentPart[],
 ): Promise<AgentRunResult> {
   let result: AgentRunResult;
   try {
@@ -277,9 +278,9 @@ export async function runSmartLoop(
  */
 export async function* runSmartLoopStream(
   config: SmartAgentConfig,
-  goal: string,
+  goal: string | LLMContentPart[],
   checkpoint?: AgentCheckpoint,
-  resumeMessage?: string,
+  resumeMessage?: string | LLMContentPart[],
 ): AsyncGenerator<AgentEvent, AgentRunResult, undefined> {
   /* ================================================================ */
   /* Phase 1: Initialization                                          */
@@ -324,7 +325,7 @@ export async function* runSmartLoopStream(
   }
 
   // 1e. Retrieve memories from store if configured
-  const memoryStrings = await retrieveMemories(config, state.goal);
+  const memoryStrings = await retrieveMemories(config, goalText(state.goal));
 
   // Seed seen memory hashes with initial memories
   for (const mem of memoryStrings) {
@@ -375,7 +376,7 @@ export async function* runSmartLoopStream(
     if (updated?.messages) state.messages = updated.messages;
   }
 
-  yield { type: "run_start" as const, goal: state.goal, timestamp: Date.now() };
+  yield { type: "run_start" as const, goal: goalText(state.goal), timestamp: Date.now() };
 
   /* ================================================================ */
   /* Phase 2: Main loop                                               */
@@ -721,7 +722,7 @@ export async function* runSmartLoopStream(
         if (outcome.content.trim()) {
           state.messages.push({ role: "assistant", content: outcome.content });
         }
-        await saveSessionSummary(config, state.goal, state.iterations, "completed");
+        await saveSessionSummary(config, goalText(state.goal), state.iterations, "completed");
         const budgetResult: AgentRunResult = {
           result: outcome.content || state.lastAssistantContent || null,
           iterations: state.iterations,
@@ -900,7 +901,7 @@ export async function* runSmartLoopStream(
             yield { type: "error_recovery" as const, strategy: "loop_guard", details: detail, timestamp: Date.now() };
             const finalText = `${detail}\n可能是这次请求本就无法满足(例如查询条件与已有数据不匹配),请换一种方式或检查参数后再试。`;
             state.messages.push({ role: "assistant", content: finalText });
-            await saveSessionSummary(config, state.goal, state.iterations, "completed");
+            await saveSessionSummary(config, goalText(state.goal), state.iterations, "completed");
             const loopResult: AgentRunResult = {
               result: finalText,
               iterations: state.iterations,
@@ -947,7 +948,7 @@ export async function* runSmartLoopStream(
             .slice(-3)
             .map((r) => `${r.tool}: ${JSON.stringify(r.result)}`.slice(0, 200))
             .join(" ");
-          const queryText = recentResults || state.goal;
+          const queryText = recentResults || goalText(state.goal);
 
           const freshMemories = await config.memory.store.query(
             config.memory.scope,
@@ -1014,7 +1015,7 @@ export async function* runSmartLoopStream(
             response: outcome.content,
             messages: state.messages,
             toolCalls: state.toolCalls,
-            goal: state.goal,
+            goal: goalText(state.goal),
           })
         : { pass: true };
 
@@ -1085,7 +1086,7 @@ export async function* runSmartLoopStream(
       await config.hooks.onCheckpoint(buildCheckpoint(state, "completed"));
     }
 
-    await saveSessionSummary(config, state.goal, state.iterations, "completed");
+    await saveSessionSummary(config, goalText(state.goal), state.iterations, "completed");
 
     const completedResult: AgentRunResult = {
       result: outcome.content,
@@ -1104,7 +1105,7 @@ export async function* runSmartLoopStream(
   /* ================================================================ */
 
   if (forceCompleted) {
-    await saveSessionSummary(config, state.goal, state.iterations, "completed");
+    await saveSessionSummary(config, goalText(state.goal), state.iterations, "completed");
     const forceResult: AgentRunResult = {
       result: state.lastAssistantContent ?? null,
       iterations: state.iterations,
@@ -1117,7 +1118,7 @@ export async function* runSmartLoopStream(
     return forceResult;
   }
 
-  await saveSessionSummary(config, state.goal, state.iterations, "max_iterations");
+  await saveSessionSummary(config, goalText(state.goal), state.iterations, "max_iterations");
 
   const maxIterResult: AgentRunResult = {
     result: state.lastAssistantContent ?? null,
