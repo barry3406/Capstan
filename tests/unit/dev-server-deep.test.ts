@@ -842,10 +842,13 @@ describe("server.ts — Client bootstrap", () => {
     expect(text).toContain("bootstrapClient");
   });
 
-  it("sets no-cache header", async () => {
+  it("sets revalidate cache header(dev 档;prod 由 STATIC_CACHE_CONTROL 切 SWR)", async () => {
     const { app } = await buildApp([], {});
     const res = await app.fetch(new Request("http://localhost/_capstan/client.js"));
-    expect(res.headers.get("cache-control")).toBe("no-cache");
+    // 测试跑在非 production → dev 档(must-revalidate,保 HMR 即时)。prod 同一常量
+    // 切 "public, max-age=300, stale-while-revalidate=86400",修「每资产每次加载吃一个
+    // revalidation RTT」(高延迟链路首屏 15s+ 的元凶之一)。
+    expect(res.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
   });
 });
 

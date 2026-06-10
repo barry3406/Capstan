@@ -135,10 +135,16 @@ const IMMUTABLE_JS_HEADERS = {
   "Content-Type": JS_CONTENT_TYPE,
   "Cache-Control": "public, max-age=31536000, immutable",
 };
+// prod:max-age=0 意味着【每个资产每次页面加载都要一个 revalidation RTT】(304 也要往返),
+// 高延迟链路(跨境 ~2s RTT)下整页瘫痪。改 SWR:5 分钟内 0 RTT 复用,之后先用缓存、后台刷新;
+// 部署后最多 5 分钟陈旧(ETag 仍在,revalidate 即纠正)。dev 保持 must-revalidate 保 HMR 即时。
+const STATIC_CACHE_CONTROL = IS_PRODUCTION
+  ? "public, max-age=300, stale-while-revalidate=86400"
+  : "public, max-age=0, must-revalidate";
 function revalidateJsHeaders(etag: string): Record<string, string> {
   return {
     "Content-Type": JS_CONTENT_TYPE,
-    "Cache-Control": "public, max-age=0, must-revalidate",
+    "Cache-Control": STATIC_CACHE_CONTROL,
     ETag: etag,
   };
 }
@@ -204,39 +210,87 @@ function injectLiveReload(html: string, port: number = 3000): string {
  * before `</body>`.  The client router reads this at bootstrap to know
  * which routes exist and their component types.
  */
-function injectManifest(html: string, manifest: RouteManifest): string {
-  const needsHydration = (route: RouteEntry): boolean => {
-    if (route.componentType === "client") return true;
-    return route.layouts.some((layoutPath) => {
-      try {
-        const firstLine = readFileSync(layoutPath, "utf-8").split(/\r?\n/, 1)[0]?.trim() ?? "";
-        return (
-          firstLine === '"use client"' ||
-          firstLine === "'use client'" ||
-          firstLine === '"use client";' ||
-          firstLine === "'use client';"
-        );
-      } catch {
-        return false;
-      }
-    });
-  };
+// client runtime 的完整静态依赖图(entry.js 及其传递 import)。modulepreload 用:
+// 浏览器靠逐层解析 import 发现这些文件,每层一个串行 RTT(实测 client.js→entry→router→
+// 8 个依赖→hydrate→vendor 共 ~7 层;跨境 2s RTT 时首屏 15s+)。在 HTML <head> 里
+// 预声明全图 → 全部并行拉取,瀑布塌缩成 1 层。列表与 react/src/client 的模块一一对应,
+// 多列无害(浏览器闲时拉),少列只是退回逐层发现。
+const CLIENT_RUNTIME_PRELOADS = [
+  "entry.js",
+  "href.js",
+  "manifest.js",
+  "router.js",
+  "cache.js",
+  "head.js",
+  "history.js",
+  "navigation-url.js",
+  "payload.js",
+  "scroll.js",
+  "transaction.js",
+  "transition.js",
+] as const;
 
+function isHydrationRoute(route: RouteEntry): boolean {
+  if (route.componentType === "client") return true;
+  return route.layouts.some((layoutPath) => {
+    try {
+      const firstLine = readFileSync(layoutPath, "utf-8").split(/\r?\n/, 1)[0]?.trim() ?? "";
+      return (
+        firstLine === '"use client"' ||
+        firstLine === "'use client'" ||
+        firstLine === '"use client";' ||
+        firstLine === "'use client';"
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** <head> 里的 modulepreload 链接:运行时全图 + (需水合时)hydrate bundle 与 React vendor。 */
+function buildModulePreloadLinks(currentRoute?: RouteEntry): string {
+  const links: string[] = [`<link rel="modulepreload" href="/_capstan/client.js"/>`];
+  for (const file of CLIENT_RUNTIME_PRELOADS) {
+    links.push(`<link rel="modulepreload" href="/_capstan/client/${file}"/>`);
+  }
+  if (currentRoute && isHydrationRoute(currentRoute)) {
+    // URL 必须与 react client entry.ts 实际 import 的串完全一致,否则 preload 不命中、白拉一份。
+    links.push(
+      `<link rel="modulepreload" href="/_capstan/client/hydrate-current.js?route=${encodeURIComponent(currentRoute.urlPattern)}"/>`,
+    );
+    links.push(`<link rel="modulepreload" href="${VENDOR_BOOTSTRAP_MODULE}?v=${VENDOR_VERSION}"/>`);
+    // hydrate bundle 把 React 系 import 外部化到这三个 shim(见 buildHydrationModule)
+    links.push(`<link rel="modulepreload" href="${SHARED_REACT_MODULE}"/>`);
+    links.push(`<link rel="modulepreload" href="${SHARED_REACT_DOM_CLIENT_MODULE}"/>`);
+    links.push(`<link rel="modulepreload" href="${SHARED_REACT_JSX_RUNTIME_MODULE}"/>`);
+  }
+  return links.join("");
+}
+
+export function injectManifest(html: string, manifest: RouteManifest, currentRoute?: RouteEntry): string {
   const clientRoutes = manifest.routes
     .filter((r) => r.type === "page")
     .map((r) => ({
       urlPattern: r.urlPattern,
       componentType: r.componentType ?? "server",
-      needsHydration: needsHydration(r),
+      needsHydration: isHydrationRoute(r),
       layouts: r.layouts,
     }));
 
-  const script = `<script>window.__CAPSTAN_MANIFEST__=${JSON.stringify({ routes: clientRoutes }).replace(/</g, "\\u003c")}</script>`;
-  const idx = html.lastIndexOf("</body>");
-  if (idx !== -1) {
-    return html.slice(0, idx) + script + "\n" + html.slice(idx);
+  // modulepreload 进 <head>(越早被解析、并行拉取启动越早);没有 </head> 就并入 body 注入。
+  const preloads = buildModulePreloadLinks(currentRoute);
+  let withPreloads = html;
+  const headIdx = html.indexOf("</head>");
+  if (headIdx !== -1) {
+    withPreloads = html.slice(0, headIdx) + preloads + html.slice(headIdx);
   }
-  return html + script;
+
+  const script = `${headIdx === -1 ? preloads : ""}<script>window.__CAPSTAN_MANIFEST__=${JSON.stringify({ routes: clientRoutes }).replace(/</g, "\\u003c")}</script>`;
+  const idx = withPreloads.lastIndexOf("</body>");
+  if (idx !== -1) {
+    return withPreloads.slice(0, idx) + script + "\n" + withPreloads.slice(idx);
+  }
+  return withPreloads + script;
 }
 
 /**
@@ -603,8 +657,9 @@ function decoratePageHtml(
   manifest: RouteManifest,
   liveReloadEnabled: boolean,
   port?: number,
+  currentRoute?: RouteEntry,
 ): string {
-  const withManifest = injectManifest(html, manifest);
+  const withManifest = injectManifest(html, manifest, currentRoute);
   return liveReloadEnabled ? injectLiveReload(withManifest, port) : withManifest;
 }
 
@@ -1613,6 +1668,7 @@ export async function buildRuntimeApp(
             manifest,
             liveReloadEnabled,
             config.port,
+            route,
           );
           return new Response(html, {
             status: pageResult.statusCode,
@@ -1625,6 +1681,7 @@ export async function buildRuntimeApp(
           manifest,
           liveReloadEnabled,
           config.port,
+          route,
         );
         return new Response(html, {
           status: pageResult.statusCode,
@@ -1927,7 +1984,7 @@ export async function buildRuntimeApp(
       status: 200,
       headers: {
         "Content-Type": "application/javascript; charset=utf-8",
-        "Cache-Control": "no-cache",
+        "Cache-Control": STATIC_CACHE_CONTROL,
       },
     });
   });
@@ -1942,14 +1999,25 @@ export async function buildRuntimeApp(
     // ── 1. hydrate-current.js:per-route bundle,内存 cache + ETag 304 短路 ──
     if (c.req.path === "/_capstan/client/hydrate-current.js") {
       const url = new URL(c.req.url);
-      const requestedPath = url.searchParams.get("path") || "/";
-      const matched = matchRoute(manifest, "GET", requestedPath);
-      if (!matched || matched.route.type !== "page") {
+      // 优先 ?route=<urlPattern>(entry.ts 以路由模式为缓存键:/x/:id 下千百个 path 共享同
+      // 一个 URL → 浏览器缓存命中)。?path= 为兼容旧 client 保留。
+      const routePattern = url.searchParams.get("route");
+      let pageRoute: RouteEntry | null = null;
+      if (routePattern) {
+        pageRoute =
+          manifest.routes.find((r) => r.type === "page" && r.urlPattern === routePattern) ?? null;
+      }
+      if (!pageRoute) {
+        const requestedPath = url.searchParams.get("path") || "/";
+        const matched = matchRoute(manifest, "GET", requestedPath);
+        pageRoute = matched && matched.route.type === "page" ? matched.route : null;
+      }
+      if (!pageRoute) {
         return new Response("Not Found", { status: 404 });
       }
       try {
         const { code, etag } = await buildHydrationModule(
-          matched.route,
+          pageRoute,
           config.rootDir ?? process.cwd(),
         );
         const notModified = conditionalGet(c, etag);
@@ -2295,7 +2363,7 @@ export async function buildRuntimeApp(
           status: 200,
           headers: {
             "Content-Type": provided.contentType ?? "application/octet-stream",
-            "Cache-Control": "no-cache",
+            "Cache-Control": STATIC_CACHE_CONTROL,
           },
         });
       }
@@ -2315,7 +2383,7 @@ export async function buildRuntimeApp(
         status: 200,
         headers: {
           "Content-Type": contentType,
-          "Cache-Control": "no-cache",
+          "Cache-Control": STATIC_CACHE_CONTROL,
         },
       });
     } catch {

@@ -23,7 +23,11 @@ export function bootstrapClient(): void {
   const currentMatch = matchRoute(manifest, window.location.pathname);
 
   if (currentMatch?.route.needsHydration) {
-    void import(`/_capstan/client/hydrate-current.js?path=${encodeURIComponent(window.location.pathname)}`);
+    // 以【路由模式】为键(?route=/x/:id)而非完整路径:同一路由的不同参数共享同一 URL →
+    // 浏览器缓存可命中;且与服务端 SSR <head> 里 modulepreload 的 URL 完全一致(preload 命中)。
+    void import(
+      `/_capstan/client/hydrate-current.js?route=${encodeURIComponent(currentMatch.route.urlPattern)}`,
+    );
   }
 
   // Global click delegation — intercept all <a> clicks that target
