@@ -1,3 +1,5 @@
+
+
 **English** | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md)
 
 <div align="center">
@@ -677,7 +679,7 @@ The docs site exposes MCP tools that coding agents (Claude Code, Cursor, etc.) c
 
 - [Getting Started](docs/getting-started.md) — Installation, first project, dev workflow
 - [Core Concepts](docs/core-concepts.md) — `defineAPI`, `defineModel`, `definePolicy`, capabilities
-- [Architecture](docs/architecture/) — System design, multi-protocol registry, route scanning
+- [Architecture](docs/architecture/core.md) — System design, multi-protocol registry, route scanning
 - [Authentication](docs/authentication.md) — JWT sessions, API keys, auth types
 - [Database](docs/database.md) — SQLite, PostgreSQL, MySQL setup and migrations
 - [Deployment](docs/deployment.md) — `capstan build`, platform targets, `deploy:init`
