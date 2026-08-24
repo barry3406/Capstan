@@ -340,6 +340,62 @@ describe("§1c native tool request serialization", () => {
     expect("tools" in capEmpty.body).toBe(false);
   });
 
+  it("U-AN-TOOLSEARCH-01 — supported models send BM25 search and deferred tools", async () => {
+    const cap: { body?: any } = {};
+    globalThis.fetch = captureJson(
+      { content: [{ type: "text", text: "ok" }], model: "claude-sonnet-4-5", stop_reason: "end_turn" },
+      cap,
+    );
+    const provider = anthropicProvider({
+      apiKey: "sk",
+      model: "claude-sonnet-4-5-20250929",
+    });
+    await provider.chat([{ role: "user", content: "hi" }], {
+      tools: [{ name: "discover_tools", description: "Find tools" }],
+      deferredTools: [{ name: "get_weather", description: "Weather", parameters: params }],
+    });
+
+    expect(provider.nativeToolSearch).toBe("anthropic");
+    expect(cap.body.tools).toEqual([
+      { type: "tool_search_tool_bm25_20251119", name: "tool_search_tool_bm25" },
+      {
+        name: "discover_tools",
+        description: "Find tools",
+        input_schema: { type: "object", properties: {} },
+      },
+      {
+        name: "get_weather",
+        description: "Weather",
+        input_schema: params,
+        defer_loading: true,
+      },
+    ]);
+  });
+
+  it("U-AN-TOOLSEARCH-02 — unsupported models keep only visible discovery", async () => {
+    const cap: { body?: any } = {};
+    globalThis.fetch = captureJson(
+      { content: [{ type: "text", text: "ok" }], model: "claude-sonnet-4", stop_reason: "end_turn" },
+      cap,
+    );
+    const provider = anthropicProvider({
+      apiKey: "sk",
+      model: "claude-sonnet-4-20250514",
+    });
+    await provider.chat([{ role: "user", content: "hi" }], {
+      tools: [{ name: "discover_tools", description: "Find tools" }],
+      deferredTools: [{ name: "get_weather", description: "Weather", parameters: params }],
+    });
+
+    expect(cap.body.tools).toEqual([
+      {
+        name: "discover_tools",
+        description: "Find tools",
+        input_schema: { type: "object", properties: {} },
+      },
+    ]);
+  });
+
   it("U-OA-STREAM-TOOLREQ-01 — OpenAI stream() sends tools + tool_choice when present (D3)", async () => {
     const cap: { body?: any } = {};
     globalThis.fetch = captureSse(["data: [DONE]"], cap);
@@ -465,6 +521,38 @@ describe("§1d native tool response parsing (chat)", () => {
       { id: "tu_1", name: "get_weather", args: { city: "Paris" } },
     ]);
     expect(result.finishReason).toBe("tool_use");
+  });
+
+  it("U-AN-TOOLSEARCH-03 — Anthropic parses nested tool references", async () => {
+    globalThis.fetch = captureJson(
+      {
+        content: [
+          {
+            type: "tool_search_tool_result",
+            content: [
+              { type: "tool_reference", tool_name: "get_weather" },
+              { type: "tool_reference", tool_name: "get_forecast" },
+            ],
+          },
+        ],
+        model: "claude-sonnet-4-5",
+        stop_reason: "tool_use",
+      },
+      {},
+    );
+    const provider = anthropicProvider({
+      apiKey: "sk",
+      model: "claude-sonnet-4-5-20250929",
+    });
+    const result = await provider.chat([{ role: "user", content: "weather?" }], {
+      tools: [{ name: "discover_tools", description: "Find tools" }],
+      deferredTools: [
+        { name: "get_weather", description: "Weather" },
+        { name: "get_forecast", description: "Forecast" },
+      ],
+    });
+
+    expect(result.disclosedTools).toEqual(["get_weather", "get_forecast"]);
   });
 
   it("U-AN-TOOLRESP-02 — Anthropic extract-text stays green, malformed tool_use dropped", async () => {
@@ -807,6 +895,40 @@ describe("§1g stream-aware native tool accumulation", () => {
     const terminal = chunks[chunks.length - 1]!;
     expect(terminal.done).toBe(true);
     expect(terminal.finishReason).toBe("end_turn");
+    expect(terminal.toolCalls).toEqual([]);
+  });
+
+  it("U-AN-STREAM-TOOLSEARCH-01 — Anthropic stream() surfaces tool references on the terminal chunk", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        sseStream([
+          "event: content_block_start",
+          'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_search_tool_result","content":[{"type":"tool_reference","tool_name":"get_weather"}]}}',
+          "",
+          "event: message_delta",
+          'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+          "",
+          "event: message_stop",
+          'data: {"type":"message_stop"}',
+          "",
+        ]),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+
+    const provider = anthropicProvider({
+      apiKey: "sk",
+      model: "claude-sonnet-4-5-20250929",
+    });
+    const chunks = await collectStream(
+      provider.stream!([{ role: "user", content: "weather?" }], {
+        tools: [{ name: "discover_tools", description: "Find tools" }],
+        deferredTools: [{ name: "get_weather", description: "Weather" }],
+      }),
+    );
+
+    const terminal = chunks[chunks.length - 1]!;
+    expect(terminal.done).toBe(true);
+    expect(terminal.disclosedTools).toEqual(["get_weather"]);
     expect(terminal.toolCalls).toEqual([]);
   });
 });

@@ -1697,9 +1697,18 @@ MCP is available via both **stdio** (\`capstan mcp\`) and **Streamable HTTP** (\
 \`\`\`typescript
 import { createMcpClient } from "@zauso-ai/capstan-agent";
 
-const client = createMcpClient({ url: "https://other-service.example.com/.well-known/mcp" });
+const client = createMcpClient({
+  url: "https://other-service.example.com/.well-known/mcp",
+  serverId: "other-service",
+});
 const tools = await client.listTools();
+const unsubscribe = client.onToolsChanged((nextTools) => {
+  replaceToolsFromSource(client.serverId, nextTools); // Replace the complete server snapshot
+});
 const result = await client.callTool("toolName", { arg: "value" });
+
+// Later, when the source is no longer needed:
+unsubscribe();
 \`\`\`
 
 ### LangChain Integration
@@ -2057,6 +2066,13 @@ const agent = createSmartAgent({
     reconciler: "llm",
   },
 
+  // Optional: progressively disclose large tool catalogs by schema-token budget
+  toolCatalog: {
+    mode: "auto",
+    inlineSchemaTokenLimit: 4096,
+    maxDisclosedSchemaTokens: 8192,
+  },
+
   // Optional: production hardening
   fallbackLlm: openaiProvider({ apiKey, model: "gpt-4o-mini" }),
   tokenBudget: 80_000,
@@ -2070,7 +2086,8 @@ const result = await agent.run("Fix the login bug");
 // Streaming — yields real-time events as the agent works
 for await (const event of agent.stream("Fix the login bug")) {
   // event.type: run_start, llm_call_start/end, tool_call_start/end,
-  //             skill_activated, compression, memory_enrichment,
+  //             skill_activated, tool_search, tools_disclosed, catalog_changed,
+  //             compression, memory_enrichment,
   //             token_budget_warning, model_fallback, error_recovery, run_end
 }
 \`\`\`
@@ -2078,8 +2095,8 @@ for await (const event of agent.stream("Fix the login bug")) {
 ### LLM providers (@zauso-ai/capstan-agent)
 
 - \`openaiProvider({ apiKey, baseUrl?, model? })\` — OpenAI Chat Completions (+ compatible). Multimodal images + native function-calling.
-- \`anthropicProvider({ apiKey, baseUrl?, model? })\` — Anthropic Messages API (chat + streaming, multimodal, native tools).
-- \`responsesProvider({ apiKey, baseUrl?, model?, reasoningEffort? })\` — OpenAI **Responses API** (\`/v1/responses\`), for reasoning models (gpt-5.x) and Responses-compatible proxies. Handles plain-JSON and SSE.
+- \`anthropicProvider({ apiKey, baseUrl?, model? })\` — Anthropic Messages API (chat + streaming, multimodal, native tools). Supported Claude models use native tool search for deferred catalogs.
+- \`responsesProvider({ apiKey, baseUrl?, model?, reasoningEffort? })\` — OpenAI **Responses API** (\`/v1/responses\`), for reasoning models (gpt-5.x) and Responses-compatible proxies. GPT-5.4+ uses native tool search; older models fall back to \`discover_tools\`.
 
 ### Code-bearing skills (bundled scripts)
 
@@ -2124,6 +2141,13 @@ const readFile: AgentTool = {
     type: "object",
     properties: { path: { type: "string", description: "File path" } },
     required: ["path"],
+  },
+
+  // Optional: keep this schema hidden until search discloses it
+  disclosure: {
+    mode: "deferred",
+    namespace: "filesystem",
+    keywords: ["read", "file", "content"],
   },
 
   // Execute the tool — receives parsed args, returns any JSON-serializable value
@@ -2238,7 +2262,7 @@ The default \`BuiltinMemoryBackend\` stores in memory. For production, implement
 
 ### Streaming Events (agent.stream)
 
-\`agent.stream(goal)\` yields \`AgentEvent\` objects. There are 14 event types:
+\`agent.stream(goal)\` yields \`AgentEvent\` objects. There are 16 event types:
 
 | Event type | Key fields | When emitted |
 |---|---|---|
@@ -2249,6 +2273,9 @@ The default \`BuiltinMemoryBackend\` stores in memory. For production, implement
 | \`tool_call_start\` | \`tool\`, \`args\`, \`iteration\` | Tool execution begins |
 | \`tool_call_end\` | \`tool\`, \`result\`, \`status\`, \`durationMs\` | Tool execution ends |
 | \`skill_activated\` | \`skill\`, \`iteration\` | Agent activates a skill |
+| \`tool_search\` | \`query\`, \`matches\`, \`native\` | A generic or provider-native catalog search completes |
+| \`tools_disclosed\` | \`tools\`, \`schemaTokens\` | Matching tool schemas become executable |
+| \`catalog_changed\` | \`previousVersion\`, \`version\`, \`retained\` | A resumed catalog differs from its checkpoint |
 | \`compression\` | \`strategy\`, \`tokensBefore\`, \`tokensAfter\` | Context compressed |
 | \`memory_enrichment\` | \`memoriesInjected\`, \`iteration\` | Memories loaded |
 | \`token_budget_warning\` | \`usedPercent\`, \`iteration\` | Budget threshold hit |
@@ -2286,6 +2313,7 @@ The smart agent includes these production-hardening features out of the box:
 - **LLM watchdog** — \`llmTimeout.chatTimeoutMs\` for total call time, \`streamIdleTimeoutMs\` for stalled streams
 - **Token budget** — \`tokenBudget\` with nudge (warn the LLM) and force-complete (stop the run) thresholds
 - **Tool result budgeting** — \`toolResultBudget.maxChars\` truncates oversized outputs; large results persisted to disk
+- **Progressive tool disclosure** — large catalogs switch to token-budgeted search; undisclosed tools cannot execute
 - **Error withholding** — on tool failure with \`failureMode: "soft"\`, the error is returned to the LLM for retry
 - **Message normalization** — ensures well-formed message sequences across providers
 - **Dynamic memory enrichment** — relevant memories injected at each iteration
@@ -2640,6 +2668,7 @@ Capstan is **file-based, multi-surface, and machine-readable**.
 
 - A route file defines the product surface.
 - A single \`defineAPI()\` becomes **HTTP + MCP + A2A + OpenAPI**.
+- Smart agents progressively disclose large tool catalogs by schema-token budget; hidden tools must be discovered before execution.
 - Page loaders run on the server and should call internal APIs through loader \`fetch\`, not by hard-coding localhost HTTP calls.
 - \`app/public/\` is served from the root URL path, so \`app/public/logo.svg\` becomes \`/logo.svg\`.
 - \`dist/deploy-manifest.json\` is the deployment contract after build.

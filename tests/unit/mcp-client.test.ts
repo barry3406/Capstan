@@ -228,6 +228,23 @@ describe("createMcpClient() factory", () => {
     const initBody = JSON.parse(initCall!.init.body as string);
     expect(initBody.params.clientInfo.name).toBe("my-custom-agent");
   });
+
+  it("assigns a deterministic serverId and accepts an explicit override", async () => {
+    installStandardMock({});
+    const derived = await createMcpClient({
+      url: "http://LOCALHOST:9999/mcp/?token=ignored",
+    });
+    expect(derived.serverId).toBe("localhost_9999_mcp");
+    await derived.close();
+
+    installStandardMock({});
+    const explicit = await createMcpClient({
+      url: "http://localhost:9999/mcp",
+      serverId: " payments ",
+    });
+    expect(explicit.serverId).toBe("payments");
+    await explicit.close();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -292,11 +309,136 @@ describe("RawMcpClient.listTools()", () => {
 
     expect(tools.length).toBe(2);
     expect(tools[0]!.name).toBe("greet");
+    expect(tools[0]!.serverId).toBe("localhost_9999_mcp");
     expect(tools[0]!.description).toBe("Say hello");
     expect(tools[0]!.inputSchema).toEqual(schema);
     expect(tools[1]!.name).toBe("bye");
     expect(tools[1]!.description).toBe("Say goodbye");
 
+    await client.close();
+  });
+
+  it("follows nextCursor until the complete tool snapshot is loaded", async () => {
+    installStandardMock({
+      "tools/list": (body) => {
+        const params = body.params as { cursor?: string };
+        return params.cursor === undefined
+          ? jsonResponse({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: {
+                tools: [{ name: "first", inputSchema: { type: "object" } }],
+                nextCursor: "page-2",
+              },
+            })
+          : jsonResponse({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: {
+                tools: [{ name: "second", inputSchema: { type: "object" } }],
+              },
+            });
+      },
+    });
+
+    const client = await createMcpClient({
+      url: "http://localhost:9999/mcp",
+      serverId: "catalog",
+    });
+    const tools = await client.listTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual(["first", "second"]);
+    expect(tools.map((tool) => tool.serverId)).toEqual(["catalog", "catalog"]);
+    const listRequests = calls
+      .map((call) => {
+        try {
+          return JSON.parse(call.init.body as string) as Record<string, unknown>;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((body) => body?.method === "tools/list");
+    expect(listRequests.map((body) => body?.["params"])).toEqual([
+      {},
+      { cursor: "page-2" },
+    ]);
+
+    await client.close();
+  });
+
+  it("refreshes the complete snapshot after a tools/list_changed notification", async () => {
+    calls = [];
+    sdkFailed = false;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (!sdkFailed && init?.method === "POST") {
+        sdkFailed = true;
+        return new Response("Method Not Allowed", { status: 405 });
+      }
+      calls.push({ url: urlStr, init: init! });
+      if (init?.method === "GET") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamController = controller;
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (init?.method === "DELETE") return jsonResponse({});
+
+      const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+      if (!("id" in body)) return new Response(null, { status: 202 });
+      if (body.method === "initialize") {
+        return jsonResponse(
+          {
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              protocolVersion: "2025-03-26",
+              capabilities: { tools: { listChanged: true } },
+              serverInfo: { name: "changing", version: "1.0.0" },
+            },
+          },
+          { "mcp-session-id": "changing-session" },
+        );
+      }
+      if (body.method === "tools/list") {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            tools: [{ name: "updated", inputSchema: { type: "object" } }],
+          },
+        });
+      }
+      return jsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    }) as FetchFn;
+
+    const client = await createMcpClient({
+      url: "http://localhost:9999/mcp",
+      serverId: "changing",
+    });
+    const changed = new Promise<Awaited<ReturnType<typeof client.listTools>>>((resolve) => {
+      client.onToolsChanged(resolve);
+    });
+    streamController!.enqueue(
+      new TextEncoder().encode(
+        'data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}',
+      ),
+    );
+    streamController!.close();
+
+    await expect(changed).resolves.toEqual([
+      {
+        serverId: "changing",
+        name: "updated",
+        description: undefined,
+        inputSchema: { type: "object" },
+      },
+    ]);
     await client.close();
   });
 

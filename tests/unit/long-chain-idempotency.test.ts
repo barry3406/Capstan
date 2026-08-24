@@ -155,6 +155,7 @@ describe("Long-chain: 50+ iterations with compression", () => {
     const agent = createSmartAgent({
       llm,
       tools: [totalTool],
+      loopGuard: { enabled: false },
       maxIterations: 100,
       contextWindowSize: 4000,
       compaction: {

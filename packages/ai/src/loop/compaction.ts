@@ -2,6 +2,7 @@ import type {
   AutocompactConfig,
   LLMMessage,
   LLMProvider,
+  LLMToolSpec,
   MicrocompactConfig,
   SnipConfig,
 } from "../types.js";
@@ -15,12 +16,12 @@ import { messageContentLength, messageText } from "./content-helpers.js";
  * Rough token estimate: sum all message content lengths and divide by 4.
  * Multimodal images count as ~375 tokens each (1500 chars / 4).
  */
-export function estimateTokens(messages: LLMMessage[]): number {
-  if (messages.length === 0) return 0;
+export function estimateTokens(messages: LLMMessage[], tools: readonly LLMToolSpec[] = []): number {
   let chars = 0;
   for (const m of messages) {
     chars += messageContentLength(m.content);
   }
+  if (tools.length > 0) chars += JSON.stringify(tools).length;
   return Math.floor(chars / 4);
 }
 

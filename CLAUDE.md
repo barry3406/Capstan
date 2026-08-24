@@ -48,7 +48,7 @@ bunx create-capstan-app
 - `@zauso-ai/capstan-db` — data modeling, Drizzle integration, migrations, vector search, and generated CRUD route helpers
 - `@zauso-ai/capstan-auth` — human and agent auth primitives: JWT sessions, API keys, OAuth, DPoP, SPIFFE/mTLS
 - `@zauso-ai/capstan-agent` — machine surfaces and interop: capability registry, MCP, A2A, OpenAPI, LangChain, testing helpers
-- `@zauso-ai/capstan-ai` — AI toolkit plus durable harness runtime: think/generate, scoped memory primitives, host-driven agent loop, task fabric, context assembly, browser/filesystem sandboxes, persisted runs
+- `@zauso-ai/capstan-ai` — AI toolkit plus durable harness runtime: think/generate, scoped memory primitives, host-driven agent loop, progressive tool disclosure, task fabric, context assembly, browser/filesystem sandboxes, persisted runs
 - `@zauso-ai/capstan-cron` — recurring execution for agent jobs and long-running automation
 - `@zauso-ai/capstan-ops` — semantic operations kernel: events, incidents, snapshots, SQLite persistence, querying, and CLI/operator consumption
 - `@zauso-ai/capstan-react` — human application shell: streaming SSR, selective hydration, layouts, metadata, image/font helpers, error/loading boundaries
@@ -84,7 +84,7 @@ Auto-generated endpoints:
 - A2A adapter: `packages/agent/src/a2a.ts`
 - MCP adapter: `packages/agent/src/mcp.ts`
 - Generated CRUD helpers: `packages/db/src/crud.ts`
-- AI toolkit & harness: `packages/ai/src/` (ai.ts, memory.ts, agent.ts, harness/)
+- AI toolkit & harness: `packages/ai/src/` (ai.ts, memory.ts, agent.ts, loop/tool-catalog.ts, harness/)
 - Cron scheduler: `packages/cron/src/` (cron.ts, ai-loop.ts)
 
 ## Verifier (AI TDD Self-Loop)

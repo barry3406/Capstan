@@ -255,7 +255,7 @@ Output includes `repairChecklist` with `fixCategory` and `autoFixable` for AI co
 
 ## For Agents — Smart Runtime
 
-`createSmartAgent()` from `@zauso-ai/capstan-ai` provides a production-grade autonomous agent runtime. Not a wrapper around an LLM — a full execution environment with 12 engineering features that separate toy demos from real-world agents.
+`createSmartAgent()` from `@zauso-ai/capstan-ai` provides a production-grade autonomous agent runtime. Not a wrapper around an LLM — a full execution environment with 13 engineering features that separate toy demos from real-world agents.
 
 And the key difference from other agent frameworks: these agents can operate the same Capstan web apps that humans use. Same APIs, same auth, same policies — no adapter layer.
 
@@ -351,6 +351,15 @@ Tools marked `isConcurrencySafe: true` execute in parallel when the LLM issues m
 ### 12. Prompt Composition
 
 Layered prompt system with `prepend`, `append`, and `replace_base` positions. Dynamic layers can inject context based on iteration count, available tools, and memory state.
+
+### 13. Progressive Tool Disclosure
+
+Large tool catalogs switch automatically from inline schemas to token-budgeted
+discovery. `discover_tools` returns compact matches, and hidden tools cannot run
+until disclosure succeeds. OpenAI and Anthropic native tool search use the same
+budget and execution gate; checkpoints preserve the append-only visible set.
+MCP clients follow paginated catalogs and publish complete snapshots after tool
+change notifications. See [Progressive Tool Disclosure](docs/progressive-tool-disclosure.md).
 
 ### Skill Layer
 
@@ -534,7 +543,7 @@ app/
 
 ## Engineering Maturity
 
-The `createSmartAgent` runtime includes 12 production features that make the difference between a demo and a system you can deploy:
+The `createSmartAgent` runtime includes 13 production features that make the difference between a demo and a system you can deploy:
 
 1. **Reactive 4-layer context compression** — snip, microcompact, autocompact, reactive compact
 2. **Model fallback with thinking strip** — auto-switch on failure, strip thinking blocks for non-thinking models
@@ -548,6 +557,7 @@ The `createSmartAgent` runtime includes 12 production features that make the dif
 10. **Lifecycle hooks** — `beforeToolCall`, `afterToolCall`, `afterIteration`, `onRunComplete`, `getControlState`
 11. **Concurrent tool execution** — `isConcurrencySafe` flag, configurable `maxConcurrency`
 12. **Layered prompt composition** — `prepend`, `append`, `replace_base` with dynamic layers
+13. **Progressive tool disclosure** — schema-token budgets, deterministic discovery, execution isolation, native provider search, resumable catalog state
 
 ---
 
@@ -557,7 +567,7 @@ Capstan ships 12 workspace packages:
 
 | Package | Description |
 |---------|-------------|
-| `@zauso-ai/capstan-ai` | **Smart agent runtime**: `createSmartAgent` with 4-layer compression, model fallback, tool validation/timeouts, LLM watchdog, token budgets, tool result budgeting, error withholding, lifecycle hooks. `defineSkill` skill layer. Self-evolution engine with `SqliteEvolutionStore`. Durable `createHarness` with browser/fs sandboxes. Also: `think`/`generate`, scoped memory, task fabric. |
+| `@zauso-ai/capstan-ai` | **Smart agent runtime**: `createSmartAgent` with progressive tool disclosure, 4-layer compression, model fallback, tool validation/timeouts, LLM watchdog, token budgets, tool result budgeting, error withholding, lifecycle hooks. `defineSkill` skill layer. Self-evolution engine with `SqliteEvolutionStore`. Durable `createHarness` with browser/fs sandboxes. Also: `think`/`generate`, scoped memory, task fabric. |
 | `@zauso-ai/capstan-core` | Hono server, `defineAPI`, `defineMiddleware`, `definePolicy`, approval workflow, 8-step verifier |
 | `@zauso-ai/capstan-agent` | `CapabilityRegistry`, MCP server (stdio + Streamable HTTP), MCP client, A2A adapter (SSE), OpenAPI generator, LangChain integration |
 | `@zauso-ai/capstan-db` | Drizzle ORM, `defineModel`, field/relation helpers, migrations, auto CRUD, vector fields, `defineEmbedding`, hybrid search |

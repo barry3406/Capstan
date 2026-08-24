@@ -110,6 +110,92 @@ describe("§1h loop mapping (chat path)", () => {
     expect(result.outcome.toolRequests.length).toBeGreaterThan(0);
     expect(result.outcome.finishReason).toBe("tool_use");
   });
+
+  it("rejects a guessed hidden tool name before execution", async () => {
+    let executeCount = 0;
+    const hidden = echoTool({
+      async execute(args) {
+        executeCount++;
+        return args;
+      },
+    });
+    const llm = chatLLM({
+      toolCalls: [{ id: "hidden_1", name: "echo", args: { msg: "guessed" } }],
+    });
+
+    const result = await executeModelAndTools(
+      llm,
+      msgs,
+      [hidden],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+    );
+
+    expect(executeCount).toBe(0);
+    expect(result.toolRecords[0]!.status).toBe("error");
+    expect(result.toolRecords[0]!.result).toMatchObject({ code: "TOOL_NOT_DISCLOSED" });
+  });
+
+  it("rejects provider-native disclosure when the catalog budget denies it", async () => {
+    let executeCount = 0;
+    const hidden = echoTool({
+      async execute(args) {
+        executeCount++;
+        return args;
+      },
+    });
+    const llm = chatLLM({
+      disclosedTools: ["echo"],
+      toolCalls: [{ id: "hidden_2", name: "echo", args: { msg: "too large" } }],
+    });
+
+    const result = await executeModelAndTools(
+      llm,
+      msgs,
+      [hidden],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+      () => [],
+    );
+
+    expect(executeCount).toBe(0);
+    expect(result.outcome.disclosedTools).toEqual([]);
+    expect(result.toolRecords[0]!.result).toMatchObject({ code: "TOOL_NOT_DISCLOSED" });
+  });
+
+  it("executes a hidden tool after provider-native disclosure is authorized", async () => {
+    let authorizedNames: readonly string[] = [];
+    const hidden = echoTool();
+    const llm = chatLLM({
+      disclosedTools: ["echo"],
+      toolCalls: [{ id: "hidden_3", name: "echo", args: { msg: "authorized" } }],
+    });
+
+    const result = await executeModelAndTools(
+      llm,
+      msgs,
+      [hidden],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+      (names) => {
+        authorizedNames = names;
+        return ["echo"];
+      },
+    );
+
+    expect(authorizedNames).toEqual(["echo"]);
+    expect(result.outcome.disclosedTools).toEqual(["echo"]);
+    expect(result.toolRecords[0]!.result).toEqual({ msg: "authorized" });
+  });
 });
 
 // ===========================================================================

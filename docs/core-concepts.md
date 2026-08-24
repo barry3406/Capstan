@@ -74,7 +74,7 @@ console.log(result.toolCalls);   // full tool call trace
 | `contextWindowSize` | `number`                  | No       | Context window size for compression decisions          |
 | `compaction`        | `Partial<CompactionConfig>` | No    | Compression tuning (snip, microcompact, autocompact)   |
 | `streaming`         | `StreamingExecutorConfig` | No       | Concurrent tool execution settings                    |
-| `toolCatalog`       | `ToolCatalogConfig`       | No       | Deferred tool loading for large tool sets              |
+| `toolCatalog`       | `ToolCatalogConfig`       | No       | Token-budgeted progressive tool disclosure              |
 | `fallbackLlm`      | `LLMProvider`             | No       | Backup model when primary fails                       |
 | `tokenBudget`       | `number \| TokenBudgetConfig` | No   | Output token budget with nudge + force-complete        |
 | `toolResultBudget`  | `ToolResultBudgetConfig`  | No       | Per-result and aggregate truncation limits              |
@@ -108,7 +108,7 @@ interface AgentRunResult {
 Before the first iteration:
 
 1. Create engine state from config (tools, messages, counters)
-2. Build tool catalog (inline all tools, or defer large sets behind a `discover_tool` meta-tool)
+2. Build tool catalog (inline all tools, or defer large schemas behind the `discover_tools` meta-tool)
 3. Inject `activate_skill` synthetic tool if skills are configured
 4. Inject `read_persisted_result` tool if tool result persistence is configured
 5. Retrieve relevant memories from memory store
@@ -235,6 +235,7 @@ const readFile: AgentTool = {
 | `name`               | `string`   | Yes      | Unique tool identifier                                   |
 | `description`        | `string`   | Yes      | What the tool does (shown to the LLM)                    |
 | `parameters`         | `object`   | No       | JSON Schema for input validation                         |
+| `disclosure`         | `object`   | No       | Initial visibility plus discovery namespace and keywords |
 | `validate`           | `function` | No       | Custom validation: `(args) => { valid, error? }`         |
 | `timeout`            | `number`   | No       | Per-tool execution timeout in milliseconds               |
 | `isConcurrencySafe`  | `boolean`  | No       | Whether this tool can run concurrently with others       |
@@ -968,19 +969,28 @@ defineAPI() --> CapabilityRegistry
 
 ### MCP Client
 
-Consume tools from external MCP servers:
+Consume tools from external MCP servers. The client follows every `tools/list`
+cursor and emits complete replacement snapshots when the server reports a tool
+catalog change:
 
 ```typescript
 import { createMcpClient } from "@zauso-ai/capstan-agent";
 
 const client = createMcpClient({
   url: "https://other-service.example.com/.well-known/mcp",
-  transport: "streamable-http",
+  serverId: "other-service",
 });
 
 const tools = await client.listTools();
+const unsubscribe = client.onToolsChanged((nextTools) => {
+  replaceToolsFromSource(client.serverId, nextTools);
+});
 const result = await client.callTool("get_weather", { city: "Tokyo" });
 ```
+
+For the visibility model, search result contract, execution gate, events,
+checkpoints, native provider support, and MCP synchronization semantics, see
+[Progressive Tool Disclosure](./progressive-tool-disclosure.md).
 
 ### LangChain Integration
 

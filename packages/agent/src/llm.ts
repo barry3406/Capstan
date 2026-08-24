@@ -49,6 +49,8 @@ export interface LLMResponse {
   toolCalls?:
     | { id: string; name: string; args: Record<string, unknown> }[]
     | undefined;
+  /** Tool definitions loaded by a provider-native search during this turn. */
+  disclosedTools?: string[] | undefined;
 }
 
 export interface LLMStreamChunk {
@@ -61,6 +63,8 @@ export interface LLMStreamChunk {
   toolCalls?:
     | { id: string; name: string; args: Record<string, unknown> }[]
     | undefined;
+  /** Terminal-only tool definitions loaded by a provider-native search. */
+  disclosedTools?: string[] | undefined;
 }
 
 /** Tool spec passed to the LLM provider. The provider can use this to
@@ -70,6 +74,8 @@ export interface LLMToolSpec {
   name: string;
   description: string;
   parameters?: Record<string, unknown> | undefined;
+  deferLoading?: boolean | undefined;
+  namespace?: string | undefined;
 }
 
 export interface LLMOptions {
@@ -82,6 +88,8 @@ export interface LLMOptions {
   /** Tools available this turn. Native-function-call providers will present
    * them; text-only providers may ignore. */
   tools?: LLMToolSpec[] | undefined;
+  /** Full definitions kept out of the initial model context when supported. */
+  deferredTools?: LLMToolSpec[] | undefined;
 }
 
 export interface LLMProvider {
@@ -95,6 +103,8 @@ export interface LLMProvider {
    * are surfaced on the terminal stream chunk / chat LLMResponse, so the loop
    * defers dispatch to stream-end for this provider. */
   nativeToolCalls?: "terminal" | undefined;
+  /** Provider-native just-in-time tool loading capability. */
+  nativeToolSearch?: "openai" | "anthropic" | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,12 +597,47 @@ function serializeAnthropicMessages(
 
 /** Map advertised tool specs into Anthropic request `tools[]`, defaulting an
  * empty object schema when `parameters` is absent. */
-function anthropicToolsBody(tools: LLMToolSpec[]): Record<string, unknown>[] {
+function anthropicToolsBody(
+  tools: LLMToolSpec[],
+  deferLoading = false,
+): Record<string, unknown>[] {
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
     input_schema: t.parameters ?? { type: "object", properties: {} },
+    ...(deferLoading || t.deferLoading ? { defer_loading: true } : {}),
   }));
+}
+
+function extractToolReferences(value: unknown): string[] {
+  const names = new Set<string>();
+  const visit = (entry: unknown): void => {
+    if (Array.isArray(entry)) {
+      for (const item of entry) visit(item);
+      return;
+    }
+    if (!entry || typeof entry !== "object") return;
+    const record = entry as Record<string, unknown>;
+    if (record["type"] === "tool_reference") {
+      const name = record["tool_name"] ?? record["name"];
+      if (typeof name === "string" && name) names.add(name);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return [...names];
+}
+
+function supportsAnthropicToolSearch(model: string): boolean {
+  const family = model.match(
+    /^claude-(?:opus|sonnet|haiku)-(\d+)-(\d{1,2})(?:-|$)/,
+  );
+  if (family) {
+    const major = Number(family[1]);
+    const minor = Number(family[2]);
+    return major > 4 || (major === 4 && minor >= 5);
+  }
+  return /^claude-(?:fable|mythos)-5(?:-|$)/.test(model);
 }
 
 export function anthropicProvider(config: {
@@ -626,8 +671,24 @@ export function anthropicProvider(config: {
     if (sys) body["system"] = sys;
     if (options?.temperature !== undefined)
       body["temperature"] = options.temperature;
-    if (options?.tools?.length)
-      body["tools"] = anthropicToolsBody(options.tools);
+    const model = options?.model ?? defaultModel;
+    const nativeSearch =
+      !!options?.deferredTools?.length && supportsAnthropicToolSearch(model);
+    const tools = [
+      ...(nativeSearch
+        ? [
+            {
+              type: "tool_search_tool_bm25_20251119",
+              name: "tool_search_tool_bm25",
+            },
+          ]
+        : []),
+      ...anthropicToolsBody(options?.tools ?? []),
+      ...(nativeSearch
+        ? anthropicToolsBody(options?.deferredTools ?? [], true)
+        : []),
+    ];
+    if (tools.length) body["tools"] = tools;
     return body;
   }
 
@@ -640,6 +701,7 @@ export function anthropicProvider(config: {
   return {
     name: "anthropic",
     nativeToolCalls: "terminal",
+    nativeToolSearch: "anthropic",
 
     async chat(messages, options) {
       const body = buildBody(messages, options, false);
@@ -662,7 +724,9 @@ export function anthropicProvider(config: {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         blocks.find((b: any) => b.type === "text")?.text ?? "";
 
-      const toolsAdvertised = !!options?.tools?.length;
+      const toolsAdvertised =
+        !!options?.tools?.length || !!options?.deferredTools?.length;
+      const disclosedTools = extractToolReferences(blocks);
       let toolCalls: ParsedToolCall[] | undefined;
       if (toolsAdvertised) {
         toolCalls = blocks
@@ -694,6 +758,7 @@ export function anthropicProvider(config: {
           : undefined,
         finishReason: data.stop_reason,
         ...(toolCalls !== undefined ? { toolCalls } : {}),
+        ...(disclosedTools.length ? { disclosedTools } : {}),
       };
     },
 
@@ -710,8 +775,10 @@ export function anthropicProvider(config: {
       if (!res.ok) throw new Error(`Anthropic error ${res.status}`);
       if (!res.body) throw new Error("No body");
 
-      const toolsAdvertised = !!options?.tools?.length;
+      const toolsAdvertised =
+        !!options?.tools?.length || !!options?.deferredTools?.length;
       const acc = new Map<number, ToolCallAccumulator>();
+      const disclosedTools = new Set<string>();
       let finishReason: string | undefined;
 
       const reader = res.body.getReader();
@@ -725,6 +792,9 @@ export function anthropicProvider(config: {
         ...(finishReason !== undefined ? { finishReason } : {}),
         ...(toolsAdvertised
           ? { toolCalls: finalizeAccumulatedToolCalls(acc) }
+          : {}),
+        ...(disclosedTools.size
+          ? { disclosedTools: [...disclosedTools] }
           : {}),
       });
 
@@ -744,6 +814,8 @@ export function anthropicProvider(config: {
         switch (type) {
           case "content_block_start": {
             const block = evt.content_block;
+            for (const name of extractToolReferences(block))
+              disclosedTools.add(name);
             if (block?.type === "tool_use") {
               const idx = typeof evt.index === "number" ? evt.index : 0;
               acc.set(idx, {
@@ -907,7 +979,12 @@ function extractResponsesToolCalls(
   return calls.length ? calls : undefined;
 }
 
-export function parseResponsesPayload(raw: string, fallbackModel: string): { content: string; model: string; toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] | undefined } {
+export function parseResponsesPayload(raw: string, fallbackModel: string): {
+  content: string;
+  model: string;
+  toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] | undefined;
+  disclosedTools?: string[] | undefined;
+} {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fromOutput = (d: any): string =>
     d?.output_text ??
@@ -931,7 +1008,13 @@ export function parseResponsesPayload(raw: string, fallbackModel: string): { con
         try {
           const d = JSON.parse(line.slice(6));
           const rr = d.response ?? d;
-          return { content: fromOutput(rr), model: rr?.model ?? fallbackModel, toolCalls: extractResponsesToolCalls(rr) };
+          const disclosedTools = extractToolReferences(rr);
+          return {
+            content: fromOutput(rr),
+            model: rr?.model ?? fallbackModel,
+            toolCalls: extractResponsesToolCalls(rr),
+            ...(disclosedTools.length ? { disclosedTools } : {}),
+          };
         } catch { break; }
       }
     }
@@ -945,10 +1028,21 @@ export function parseResponsesPayload(raw: string, fallbackModel: string): { con
   }
   try {
     const d = JSON.parse(raw);
-    return { content: fromOutput(d), model: d.model ?? fallbackModel, toolCalls: extractResponsesToolCalls(d) };
+    const disclosedTools = extractToolReferences(d);
+    return {
+      content: fromOutput(d),
+      model: d.model ?? fallbackModel,
+      toolCalls: extractResponsesToolCalls(d),
+      ...(disclosedTools.length ? { disclosedTools } : {}),
+    };
   } catch {
     return { content: "", model: fallbackModel };
   }
+}
+
+function supportsOpenAIToolSearch(model: string): boolean {
+  const match = /^gpt-5\.(\d+)(?:\b|[-_])/.exec(model.toLowerCase());
+  return match?.[1] !== undefined && Number(match[1]) >= 4;
 }
 
 export function responsesProvider(config: {
@@ -967,6 +1061,7 @@ export function responsesProvider(config: {
     // Responses API 原生支持 function tools;工具调用在终态响应里返回,
     // 交给 smart-agent loop 在 stream-end 统一派发。
     nativeToolCalls: "terminal",
+    nativeToolSearch: "openai",
     async chat(messages, options) {
       const sys = messages
         .filter((m) => m.role === "system")
@@ -978,8 +1073,9 @@ export function responsesProvider(config: {
           role: m.role,
           content: responsesContentParts(m.role, m.content),
         }));
+      const model = options?.model ?? defaultModel;
       const body: Record<string, unknown> = {
-        model: options?.model ?? defaultModel,
+        model,
         input: input.length ? input : [{ role: "user", content: [{ type: "input_text", text: "(continue)" }] }],
         instructions: sys || "You are a helpful assistant.",
         store: false,
@@ -989,13 +1085,27 @@ export function responsesProvider(config: {
       // Responses reasoning models reject `temperature`; only forward token cap.
       if (options?.maxTokens !== undefined) body["max_output_tokens"] = options.maxTokens;
       // 原生 function tools(Responses API 的扁平 function 形态)。
-      if (options?.tools && options.tools.length > 0) {
-        body["tools"] = options.tools.map((t) => ({
+      const visibleTools = (options?.tools ?? []).map((t) => ({
           type: "function",
           name: t.name,
           description: t.description,
           parameters: t.parameters ?? { type: "object", properties: {} },
-        }));
+      }));
+      const useNativeToolSearch =
+        !!options?.deferredTools?.length && supportsOpenAIToolSearch(model);
+      const deferredTools = (useNativeToolSearch ? options?.deferredTools ?? [] : []).map((t) => ({
+        type: "function",
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters ?? { type: "object", properties: {} },
+        defer_loading: true,
+      }));
+      if (visibleTools.length || deferredTools.length) {
+        body["tools"] = [
+          ...(deferredTools.length ? [{ type: "tool_search" }] : []),
+          ...visibleTools,
+          ...deferredTools,
+        ];
       }
 
       const res = await resilientFetch(url, {
@@ -1006,16 +1116,19 @@ export function responsesProvider(config: {
       });
       const raw = await res.text();
       if (!res.ok) throw new Error(`Responses API error ${res.status}: ${raw.slice(0, 500)}`);
-      const parsed = parseResponsesPayload(raw, options?.model ?? defaultModel);
+      const parsed = parseResponsesPayload(raw, model);
       // Honour the toolCalls contract: present (possibly []) only when tools
       // were advertised this turn, undefined otherwise — this drives the smart
       // loop's defer-gating (undefined => text-parse fallback, [] => no call).
-      const toolsAdvertised = !!options?.tools?.length;
+      const toolsAdvertised = visibleTools.length > 0 || deferredTools.length > 0;
       const toolCalls = toolsAdvertised ? (parsed.toolCalls ?? []) : undefined;
       return {
         content: parsed.content,
         model: parsed.model,
         ...(toolCalls !== undefined ? { toolCalls } : {}),
+        ...(parsed.disclosedTools?.length
+          ? { disclosedTools: parsed.disclosedTools }
+          : {}),
       };
     },
   };

@@ -280,6 +280,7 @@ describe("Integration Tests", () => {
         store: memoryStore,
         scope,
       },
+      loopGuard: { enabled: false },
       maxIterations: 10,
     });
 

@@ -282,8 +282,8 @@ describe("createSmartAgent — basic behaviors", () => {
 
     const agent = createSmartAgent({
       llm: mockLLM(
-        Array.from({ length: maxIter + 5 }, () =>
-          JSON.stringify({ tool: "counter", arguments: {} }),
+        Array.from({ length: maxIter + 5 }, (_, iteration) =>
+          JSON.stringify({ tool: "counter", arguments: { iteration } }),
         ),
       ),
       tools: [counterTool],
@@ -1254,10 +1254,9 @@ describe("createSmartAgent — resume", () => {
 // ---------------------------------------------------------------------------
 
 describe("createSmartAgent — tool catalog", () => {
-  it("with many tools (>15), discover_tools meta-tool is added to available tools", async () => {
+  it("adds discover_tools when progressive disclosure is enabled", async () => {
     const capturedMessages: LLMMessage[][] = [];
 
-    // Create 70 tools — exceeds default deferThreshold of 64
     const tools: AgentTool[] = Array.from({ length: 70 }, (_, i) => ({
       name: `tool_${i}`,
       description: `Tool number ${i}`,
@@ -1273,6 +1272,7 @@ describe("createSmartAgent — tool catalog", () => {
         "Found it.",
       ]),
       tools,
+      toolCatalog: { mode: "progressive" },
     });
 
     const result = await agent.run("Find a specific tool");
@@ -1281,12 +1281,15 @@ describe("createSmartAgent — tool catalog", () => {
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls[0]!.tool).toBe("discover_tools");
     // The discover result should contain the matching tool
-    const discoverResult = result.toolCalls[0]!.result as Array<{ name: string }>;
-    expect(discoverResult.some((t) => t.name === "tool_5")).toBe(true);
+    const discoverResult = result.toolCalls[0]!.result as {
+      matches: Array<{ name: string }>;
+      disclosed: string[];
+    };
+    expect(discoverResult.matches.some((t) => t.name === "tool_5")).toBe(true);
+    expect(discoverResult.disclosed).toContain("tool_5");
   });
 
   it("discover_tools meta-tool is executable and returns matching tools", async () => {
-    // Create 72 tools (> 64 threshold), some with "database" in the name
     const tools: AgentTool[] = [
       ...Array.from({ length: 70 }, (_, i) => ({
         name: `generic_tool_${i}`,
@@ -1319,6 +1322,7 @@ describe("createSmartAgent — tool catalog", () => {
         "Query complete.",
       ]),
       tools,
+      toolCatalog: { mode: "progressive" },
     });
 
     const result = await agent.run("Find database tools and query");
@@ -1328,12 +1332,16 @@ describe("createSmartAgent — tool catalog", () => {
     expect(result.toolCalls.length).toBeGreaterThanOrEqual(2);
     expect(result.toolCalls[0]!.tool).toBe("discover_tools");
     // The discover_tools result should contain the matching database tools
-    const discoverResult = result.toolCalls[0]!.result as Array<{ name: string }>;
-    expect(discoverResult.some((t) => t.name === "database_query")).toBe(true);
-    expect(discoverResult.some((t) => t.name === "database_insert")).toBe(true);
+    const discoverResult = result.toolCalls[0]!.result as {
+      matches: Array<{ name: string }>;
+      disclosed: string[];
+    };
+    expect(discoverResult.matches.some((t) => t.name === "database_query")).toBe(true);
+    expect(discoverResult.matches.some((t) => t.name === "database_insert")).toBe(true);
+    expect(discoverResult.disclosed).toContain("database_query");
   });
 
-  it("injects discover_tools prompt when tool count exceeds threshold", async () => {
+  it("injects discover_tools prompt when schema tokens exceed the inline budget", async () => {
     const manyTools = Array.from({ length: 20 }, (_, i) => ({
       name: `tool_${i}`,
       description: `Tool ${i}`,
@@ -1345,14 +1353,14 @@ describe("createSmartAgent — tool catalog", () => {
     const agent = createSmartAgent({
       llm: mockLLM(["done"], captured),
       tools: manyTools,
-      toolCatalog: { deferThreshold: 5 },
+      toolCatalog: { inlineSchemaTokenLimit: 1 },
     });
     await agent.run("test");
     const systemPrompt = captured[0]![0]!.content;
     expect(systemPrompt).toContain("discover_tools");
   });
 
-  it("discover_tools with empty query returns all tools", async () => {
+  it("rejects an empty discovery query instead of dumping the catalog", async () => {
     const tools: AgentTool[] = Array.from({ length: 70 }, (_, i) => ({
       name: `tool_${i}`,
       description: `Tool ${i}`,
@@ -1367,15 +1375,17 @@ describe("createSmartAgent — tool catalog", () => {
         "Listed all tools.",
       ]),
       tools,
+      toolCatalog: { mode: "progressive" },
     });
 
     const result = await agent.run("List all tools");
 
     expect(result.toolCalls.length).toBeGreaterThanOrEqual(1);
     expect(result.toolCalls[0]!.tool).toBe("discover_tools");
-    const discoverResult = result.toolCalls[0]!.result as Array<{ name: string }>;
-    // Should return all 70 tools (not the discover_tools meta-tool itself)
-    expect(discoverResult.length).toBe(70);
+    expect(result.toolCalls[0]!.status).toBe("error");
+    expect(result.toolCalls[0]!.result).toEqual({
+      error: "Input validation failed:\nquery must be a non-empty string",
+    });
   });
 });
 

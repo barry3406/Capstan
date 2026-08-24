@@ -27,6 +27,7 @@ export interface EngineState {
   iterations: number;
   maxOutputTokens: number;
   compaction: CompactionState;
+  toolCatalog?: NonNullable<AgentCheckpoint["toolCatalog"]> | undefined;
   continuationPrompt?: string | undefined;
   lastAssistantContent?: string | undefined;
   /** Accumulated output tokens across iterations for token budget tracking */
@@ -66,6 +67,9 @@ export function createEngineState(
       iterations: checkpoint.iterations,
       maxOutputTokens: checkpoint.maxOutputTokens,
       compaction: { ...checkpoint.compaction },
+      toolCatalog: checkpoint.toolCatalog
+        ? { version: checkpoint.toolCatalog.version, disclosed: [...checkpoint.toolCatalog.disclosed] }
+        : undefined,
       outputTokensUsed: 0,
       budgetNudgeSent: false,
       runStartTime: Date.now(),
@@ -98,6 +102,7 @@ export function createEngineState(
       reactiveCompactRetries: 0,
       tokenEscalations: 0,
     },
+    toolCatalog: undefined,
     outputTokensUsed: 0,
     budgetNudgeSent: false,
     runStartTime: Date.now(),
@@ -119,5 +124,8 @@ export function buildCheckpoint(state: EngineState, stage: AgentCheckpoint["stag
     taskCalls: state.taskCalls.map((c) => ({ ...c })),
     maxOutputTokens: state.maxOutputTokens,
     compaction: { ...state.compaction },
+    toolCatalog: state.toolCatalog
+      ? { version: state.toolCatalog.version, disclosed: [...state.toolCatalog.disclosed] }
+      : undefined,
   };
 }

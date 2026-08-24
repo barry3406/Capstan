@@ -54,7 +54,7 @@ interface SmartAgentConfig {
   /** Concurrent tool execution configuration. */
   streaming?: StreamingExecutorConfig | undefined;
 
-  /** Deferred tool loading when tool count exceeds threshold. */
+  /** Token-budgeted progressive disclosure for large tool schemas. */
   toolCatalog?: ToolCatalogConfig | undefined;
 
   /** Lifecycle hooks for observability and policy enforcement. */
@@ -136,6 +136,13 @@ interface AgentTool {
 
   /** JSON Schema for tool input arguments. */
   parameters?: Record<string, unknown> | undefined;
+
+  /** Initial visibility and deterministic catalog search metadata. */
+  disclosure?: {
+    mode?: "always" | "deferred" | undefined;
+    namespace?: string | undefined;
+    keywords?: string[] | undefined;
+  } | undefined;
 
   /** Whether this tool is safe for parallel execution (default: false). */
   isConcurrencySafe?: boolean | undefined;
@@ -636,6 +643,12 @@ interface AgentCheckpoint {
     tokenEscalations: number;
   };
 
+  /** Append-only visible tool set used for deterministic resume. */
+  toolCatalog?: {
+    version: string;
+    disclosed: string[];
+  } | undefined;
+
   /** Details of the pending approval, if any. */
   pendingApproval?: {
     kind: "tool" | "task";
@@ -707,10 +720,29 @@ interface StreamingExecutorConfig {
 
 ```typescript
 interface ToolCatalogConfig {
-  /** When tool count exceeds this, defer non-essential tools. */
-  deferThreshold: number;
+  /** Auto switches by schema tokens; inline preserves legacy behavior. */
+  mode?: "auto" | "inline" | "progressive" | undefined;
+
+  /** Initial schema budget used by auto mode. Default: 4096. */
+  inlineSchemaTokenLimit?: number | undefined;
+
+  /** Compact matches per discovery. Default: 5, maximum: 10. */
+  maxSearchResults?: number | undefined;
+
+  /** Maximum visible schema tokens accumulated in a run. Default: 8192. */
+  maxDisclosedSchemaTokens?: number | undefined;
+
+  /** @deprecated Use mode and inlineSchemaTokenLimit. */
+  deferThreshold?: number | undefined;
 }
 ```
+
+In progressive mode, `discover_tools({ query, limit? })` searches deferred
+definitions and makes accepted schemas visible on the next turn. A hidden tool
+cannot execute merely because a model guessed its name. OpenAI and Anthropic
+native tool search use the same disclosure budget and execution gate. See
+[Progressive Tool Disclosure](./progressive-tool-disclosure.md) for the complete
+contract.
 
 ---
 
@@ -2507,15 +2539,24 @@ function routeToToolName(method: string, path: string): string
 function createMcpClient(options: McpClientOptions): McpClient
 
 interface McpClientOptions {
-  url?: string;                        // Streamable HTTP endpoint
-  command?: string;                    // stdio command (alternative to url)
-  args?: string[];                     // stdio command args
-  transport?: "streamable-http" | "stdio";
+  url: string;                         // Streamable HTTP endpoint
+  serverId?: string;                   // Stable source identity; derived from url by default
+  authorization?: string;              // Authorization header value
+  clientName?: string;                 // MCP client identity
+}
+
+interface McpTool {
+  serverId: string;
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
 }
 
 interface McpClient {
-  listTools(): Promise<Array<{ name: string; description?: string; inputSchema: unknown }>>;
-  callTool(name: string, args?: unknown): Promise<unknown>;
+  readonly serverId: string;
+  listTools(): Promise<McpTool[]>;
+  onToolsChanged(listener: (tools: McpTool[]) => void | Promise<void>): () => void;
+  callTool(name: string, args?: Record<string, unknown>): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -2525,6 +2566,10 @@ class McpTestHarness {
   callTool(name: string, args?: unknown): Promise<unknown>;
 }
 ```
+
+`listTools()` follows `nextCursor` until the full catalog is loaded.
+`onToolsChanged()` listens for `notifications/tools/list_changed`, refetches all
+pages, and supplies a complete replacement snapshot for `serverId`.
 
 ### A2A
 

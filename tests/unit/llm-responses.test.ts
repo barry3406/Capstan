@@ -147,6 +147,76 @@ describe("responsesProvider — native function-calling", () => {
     ]);
   });
 
+  it("uses native tool search for deferred tools on supported models", async () => {
+    const cap: { body?: any } = {};
+    globalThis.fetch = captureResponses(JSON_OK, cap as any);
+    const p = responsesProvider({ apiKey: "sk", model: "gpt-5.5" });
+
+    await p.chat([{ role: "user", content: "weather?" }], {
+      tools: [{ name: "discover_tools", description: "Find tools" }],
+      deferredTools: [weatherTool],
+    });
+
+    expect(p.nativeToolSearch).toBe("openai");
+    expect(cap.body.tools).toEqual([
+      { type: "tool_search" },
+      {
+        type: "function",
+        name: "discover_tools",
+        description: "Find tools",
+        parameters: { type: "object", properties: {} },
+      },
+      {
+        type: "function",
+        name: "get_weather",
+        description: "Get weather",
+        parameters: weatherTool.parameters,
+        defer_loading: true,
+      },
+    ]);
+  });
+
+  it("falls back to visible discovery on models without native tool search", async () => {
+    const cap: { body?: any } = {};
+    globalThis.fetch = captureResponses(JSON_OK, cap as any);
+    const p = responsesProvider({ apiKey: "sk", model: "gpt-5.3" });
+
+    await p.chat([{ role: "user", content: "weather?" }], {
+      tools: [{ name: "discover_tools", description: "Find tools" }],
+      deferredTools: [weatherTool],
+    });
+
+    expect(cap.body.tools).toEqual([
+      {
+        type: "function",
+        name: "discover_tools",
+        description: "Find tools",
+        parameters: { type: "object", properties: {} },
+      },
+    ]);
+  });
+
+  it("extracts disclosed tool references from JSON and completed SSE payloads", () => {
+    const output = [
+      {
+        type: "tool_search_call",
+        results: [{ type: "tool_reference", tool_name: "get_weather" }],
+      },
+    ];
+    expect(
+      parseResponsesPayload(JSON.stringify({ model: "gpt-5.5", output }), "m")
+        .disclosedTools,
+    ).toEqual(["get_weather"]);
+
+    const completed = JSON.stringify({ response: { model: "gpt-5.5", output } });
+    expect(
+      parseResponsesPayload(
+        `event: response.completed\ndata: ${completed}\n\n`,
+        "m",
+      ).disclosedTools,
+    ).toEqual(["get_weather"]);
+  });
+
   it("returns the model's tool calls when tools were advertised", async () => {
     globalThis.fetch = captureResponses(TOOL_JSON, {});
     const p = responsesProvider({ apiKey: "sk" });

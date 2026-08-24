@@ -219,6 +219,7 @@ export interface ModelOutcome {
   content: string;
   toolRequests: ToolRequest[];
   finishReason: ModelFinishReason;
+  disclosedTools?: string[] | undefined;
   hasToolErrors?: boolean | undefined;
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
@@ -444,6 +445,8 @@ export async function executeModelAndTools(
   _config: StreamingExecutorConfig | undefined,
   llmOptions?: LLMOptions,
   llmTimeout?: import("../types.js").LLMTimeoutConfig,
+  visibleTools?: AgentTool[],
+  authorizeToolDisclosure?: (names: readonly string[]) => string[],
 ): Promise<{
   outcome: ModelOutcome;
   toolRecords: AgentToolCallRecord[];
@@ -452,6 +455,15 @@ export async function executeModelAndTools(
 }> {
   const maxConcurrency = Math.max(1, _config?.maxConcurrency ?? 10);
   const toolMap = new Map(tools.map((t) => [t.name, t]));
+  const advertisedTools = visibleTools ?? tools;
+  const allowedToolNames = new Set(advertisedTools.map((tool) => tool.name));
+  const authorizeDisclosures = (names: readonly string[]): string[] => {
+    const authorized = authorizeToolDisclosure
+      ? authorizeToolDisclosure(names)
+      : [...names];
+    for (const name of authorized) allowedToolNames.add(name);
+    return authorized;
+  };
 
   // Forward the actual tool catalogue to the LLM provider so native function-
   // calling adapters (OpenAI / Anthropic) can present them. Text-only
@@ -459,14 +471,28 @@ export async function executeModelAndTools(
   // Only attach `tools` when there is at least one — an empty catalogue leaves
   // the forwarded options untouched (providers omit tools/tool_choice for an
   // absent OR empty list anyway), so a no-tool turn forwards `llmOptions` as-is.
-  const toolSpecs = tools.map((t) => ({
+  const toolSpecs = advertisedTools.map((t) => ({
     name: t.name,
     description: t.description,
     ...(t.parameters ? { parameters: t.parameters } : {}),
+    ...(t.disclosure?.namespace ? { namespace: t.disclosure.namespace } : {}),
   }));
+  const deferredToolSpecs =
+    llm.nativeToolSearch !== undefined
+      ? tools
+          .filter((tool) => !allowedToolNames.has(tool.name))
+          .map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            ...(tool.parameters ? { parameters: tool.parameters } : {}),
+            ...(tool.disclosure?.namespace ? { namespace: tool.disclosure.namespace } : {}),
+            deferLoading: true,
+          }))
+      : [];
   const optionsWithTools: LLMOptions = {
     ...(llmOptions ?? {}),
     ...(toolSpecs.length > 0 ? { tools: toolSpecs } : {}),
+    ...(deferredToolSpecs.length > 0 ? { deferredTools: deferredToolSpecs } : {}),
   };
 
   // =========================================================================
@@ -493,6 +519,7 @@ export async function executeModelAndTools(
     let terminalToolCalls:
       | { id: string; name: string; args: Record<string, unknown> }[]
       | undefined;
+    let terminalDisclosedTools: string[] | undefined;
 
     // Track dispatched tool request ids so we only dispatch each once
     const dispatchedIds = new Set<string>();
@@ -528,6 +555,7 @@ export async function executeModelAndTools(
         finishReason = chunk.finishReason;
         // Native tool calls are carried ONLY on the terminal chunk.
         terminalToolCalls = chunk.toolCalls;
+        terminalDisclosedTools = chunk.disclosedTools;
       }
 
       // Eager mid-stream dispatch is the LEGACY text path only. When native
@@ -564,6 +592,10 @@ export async function executeModelAndTools(
               order: stableReq.order,
               status: "error",
             });
+            continue;
+          }
+          if (!allowedToolNames.has(stableReq.name)) {
+            concurrentResults.set(stableReq.order, undisclosedToolRecord(stableReq));
             continue;
           }
 
@@ -604,6 +636,9 @@ export async function executeModelAndTools(
         ? toolRequestsFromNative(terminalToolCalls)
         : parseToolRequests(content)
       : parseToolRequests(content);
+    const authorizedDisclosures = terminalDisclosedTools
+      ? authorizeDisclosures(terminalDisclosedTools)
+      : undefined;
 
     // Route the resolved requests through the SAME post-stream execution
     // machinery (concurrent dispatcher + write queue + unknown-tool errors).
@@ -630,6 +665,10 @@ export async function executeModelAndTools(
           order: req.order,
           status: "error",
         });
+        continue;
+      }
+      if (!allowedToolNames.has(req.name)) {
+        concurrentResults.set(req.order, undisclosedToolRecord(req));
         continue;
       }
 
@@ -664,6 +703,7 @@ export async function executeModelAndTools(
       content,
       toolRequests: allToolRequests,
       finishReason: normalizedFinish,
+      ...(authorizedDisclosures ? { disclosedTools: authorizedDisclosures } : {}),
     };
 
     // If blocked by approval, return immediately with collected records
@@ -744,6 +784,9 @@ export async function executeModelAndTools(
   const content = response.content;
   const finishReason = response.finishReason;
   const usage = response.usage;
+  const authorizedDisclosures = response.disclosedTools
+    ? authorizeDisclosures(response.disclosedTools)
+    : undefined;
 
   // D1: a defined native `toolCalls` field (even `[]`) means the provider
   // spoke natively — use it verbatim and DO NOT text-parse. Only `undefined`
@@ -759,6 +802,7 @@ export async function executeModelAndTools(
     toolRequests,
     finishReason: normalizedFinish,
     ...(usage ? { usage } : {}),
+    ...(authorizedDisclosures ? { disclosedTools: authorizedDisclosures } : {}),
   };
 
   if (toolRequests.length === 0) {
@@ -786,6 +830,10 @@ export async function executeModelAndTools(
         order: request.order,
         status: "error",
       });
+      continue;
+    }
+    if (!allowedToolNames.has(request.name)) {
+      records.push(undisclosedToolRecord(request));
       continue;
     }
 
@@ -921,6 +969,20 @@ function cloneArgs(args: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(args).map(([key, value]) => [key, cloneUnknown(value)]),
   );
+}
+
+function undisclosedToolRecord(request: ToolRequest): AgentToolCallRecord {
+  return {
+    tool: request.name,
+    args: request.args,
+    result: {
+      error: `Tool "${request.name}" has not been disclosed. Search the tool catalog first.`,
+      code: "TOOL_NOT_DISCLOSED",
+    },
+    requestId: request.id,
+    order: request.order,
+    status: "error",
+  };
 }
 
 function cloneUnknown(value: unknown): unknown {

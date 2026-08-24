@@ -2,6 +2,7 @@ import type {
   AgentCheckpoint,
   AgentEvent,
   AgentRunResult,
+  AgentTool,
   LLMMessage,
   LLMContentPart,
   SmartAgentConfig,
@@ -9,7 +10,7 @@ import type {
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createEngineState, buildCheckpoint, goalText } from "./state.js";
-import { createToolCatalog } from "./tool-catalog.js";
+import { createToolCatalog, type ToolCatalogEvent } from "./tool-catalog.js";
 import { composeSystemPrompt } from "./prompt-composer.js";
 import { estimateTokens, snipMessages, microcompactMessages, clearStaleToolResults, autocompact } from "./compaction.js";
 import { executeModelAndTools } from "./streaming-executor.js";
@@ -37,6 +38,18 @@ const DEFAULT_NUDGE_THRESHOLD = 80;
 
 /** Interval (in iterations) at which dynamic memory enrichment runs */
 const MEMORY_ENRICHMENT_INTERVAL = 5;
+
+function toAgentCatalogEvent(event: ToolCatalogEvent, iteration: number): AgentEvent {
+  const timestamp = Date.now();
+  switch (event.type) {
+    case "tool_search":
+      return { ...event, iteration, timestamp };
+    case "tools_disclosed":
+      return { ...event, iteration, timestamp };
+    case "catalog_changed":
+      return { ...event, timestamp };
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -295,24 +308,29 @@ export async function* runSmartLoopStream(
   // 1a. Create engine state from config (or checkpoint for resume)
   state = createEngineState(config, goal, checkpoint, resumeMessage);
 
-  // 1b. Build tool catalog (inline or deferred)
-  const catalog = createToolCatalog(state.tools, config.toolCatalog);
+  // 1b. Build the trusted registry and restore its append-only disclosure state.
+  const catalog = createToolCatalog(state.tools, config.toolCatalog, state.toolCatalog);
+  state.toolCatalog = catalog.snapshot();
   const allTools = catalog.discoverTool
     ? [...state.tools, catalog.discoverTool]
     : [...state.tools];
+  const alwaysVisibleTools: AgentTool[] = [];
 
   // 1c. Skill injection
   if (config.skills && config.skills.length > 0) {
-    allTools.push(...createSkillTools(config.skills));
+    const skillTools = createSkillTools(config.skills);
+    allTools.push(...skillTools);
+    alwaysVisibleTools.push(...skillTools);
   }
 
   // 1d. Inject read_persisted_result tool when persistence is configured
   if (config.toolResultBudget?.persistDir) {
     const dir = config.toolResultBudget.persistDir;
-    allTools.push({
+    const persistedResultTool: AgentTool = {
       name: "read_persisted_result",
       description: "Read a full tool result that was previously truncated and persisted.",
       parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      disclosure: { mode: "always", namespace: "capstan" },
       isConcurrencySafe: true,
       async execute(args) {
         const safeId = (args.id as string).replace(/[^a-zA-Z0-9_-]/g, "");
@@ -321,8 +339,25 @@ export async function* runSmartLoopStream(
           return JSON.parse(readFileSync(join(dir, `tool-result-${safeId}.json`), "utf-8"));
         } catch { return { error: `Persisted result "${safeId}" not found` }; }
       },
-    });
+    };
+    allTools.push(persistedResultTool);
+    alwaysVisibleTools.push(persistedResultTool);
   }
+
+  const getVisibleTools = (): AgentTool[] => [
+    ...catalog.getVisibleTools(),
+    ...(catalog.discoverTool ? [catalog.discoverTool] : []),
+    ...alwaysVisibleTools,
+  ];
+  const visibleToolSpecs = () => getVisibleTools().map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...(tool.parameters ? { parameters: tool.parameters } : {}),
+    ...(tool.disclosure?.namespace ? { namespace: tool.disclosure.namespace } : {}),
+  }));
+  const estimateStateTokens = () => estimateTokens(state!.messages, visibleToolSpecs());
+  const authorizeNativeDisclosure = (names: readonly string[]) =>
+    catalog.recordNativeSearch("", names);
 
   // 1e. Retrieve memories from store if configured
   const memoryStrings = await retrieveMemories(config, goalText(state.goal));
@@ -336,7 +371,7 @@ export async function* runSmartLoopStream(
   if (!checkpoint) {
     // Build prompt config with catalog layer injected for deferred mode
     const promptConfig = config.prompt ? { ...config.prompt } : {};
-    if (catalog.mode === "deferred") {
+    if (catalog.mode === "progressive") {
       const catalogLayer = {
         id: "tool-catalog",
         content: catalog.promptSection,
@@ -358,7 +393,7 @@ export async function* runSmartLoopStream(
     }
 
     const systemPrompt = composeSystemPrompt(promptConfig, {
-      tools: state.tools,
+      tools: getVisibleTools(),
       iteration: 0,
       memories: memoryStrings,
       tokenBudget: Math.floor(state.contextWindowSize * 0.25),
@@ -377,6 +412,9 @@ export async function* runSmartLoopStream(
   }
 
   yield { type: "run_start" as const, goal: goalText(state.goal), timestamp: Date.now() };
+  for (const event of catalog.takeEvents()) {
+    yield toAgentCatalogEvent(event, state.iterations);
+  }
 
   /* ================================================================ */
   /* Phase 2: Main loop                                               */
@@ -390,7 +428,7 @@ export async function* runSmartLoopStream(
     /* -------------------------------------------------------------- */
     /* 2a. COMPRESSION CHECK                                          */
     /* -------------------------------------------------------------- */
-    let estimatedTokensNow = estimateTokens(state.messages);
+    let estimatedTokensNow = estimateStateTokens();
 
     if (estimatedTokensNow > state.contextWindowSize * 0.6) {
       const tokensBefore = estimatedTokensNow;
@@ -402,21 +440,21 @@ export async function* runSmartLoopStream(
       state.messages = snipResult.messages;
 
       if (snipResult.snippedCount > 0) {
-        yield { type: "compression" as const, strategy: "snip" as const, tokensBefore, tokensAfter: estimateTokens(state.messages), timestamp: Date.now() };
+        yield { type: "compression" as const, strategy: "snip" as const, tokensBefore, tokensAfter: estimateStateTokens(), timestamp: Date.now() };
       }
 
       // Tool result clearing(默认,参考 Anthropic clear_tool_uses):保留最近 keep 个
       // 工具结果完整,更早的剔成占位符。比旧的「截断到 N 字符」回收更多 context。
       // `toolClear.enabled: false` 退回旧的 microcompact 截断行为。
       const toolClearEnabled = config.compaction?.toolClear?.enabled !== false;
-      const preMicroTokens = estimateTokens(state.messages);
+      const preMicroTokens = estimateStateTokens();
       if (toolClearEnabled) {
         const clearResult = clearStaleToolResults(
           state.messages,
           config.compaction?.toolClear?.keep ?? 3,
         );
         state.messages = clearResult.messages;
-        const postClearTokens = estimateTokens(state.messages);
+        const postClearTokens = estimateStateTokens();
         if (clearResult.clearedCount > 0) {
           yield { type: "compression" as const, strategy: "tool_clear" as const, tokensBefore: preMicroTokens, tokensAfter: postClearTokens, timestamp: Date.now() };
         }
@@ -426,14 +464,14 @@ export async function* runSmartLoopStream(
           protectedTail: config.compaction?.microcompact?.protectedTail ?? 6,
         }, state.microcompactCache);
         state.messages = microResult.messages;
-        const postMicroTokens = estimateTokens(state.messages);
+        const postMicroTokens = estimateStateTokens();
         if (postMicroTokens < preMicroTokens) {
           yield { type: "compression" as const, strategy: "microcompact" as const, tokensBefore: preMicroTokens, tokensAfter: postMicroTokens, timestamp: Date.now() };
         }
       }
 
       // Re-estimate after snip + microcompact to avoid stale threshold checks
-      estimatedTokensNow = estimateTokens(state.messages);
+      estimatedTokensNow = estimateStateTokens();
     }
 
     if (estimatedTokensNow > state.contextWindowSize * 0.85) {
@@ -450,7 +488,7 @@ export async function* runSmartLoopStream(
           } else {
             state.messages = acResult.messages;
             state.compaction.autocompactFailures = 0;
-            yield { type: "compression" as const, strategy: "autocompact" as const, tokensBefore: preAutocompactTokens, tokensAfter: estimateTokens(state.messages), timestamp: Date.now() };
+            yield { type: "compression" as const, strategy: "autocompact" as const, tokensBefore: preAutocompactTokens, tokensAfter: estimateStateTokens(), timestamp: Date.now() };
             // Post-compact cleanup: reset caches that hold stale references
             state.microcompactCache.clear();
             state.seenMemoryHashes.clear();
@@ -519,7 +557,7 @@ export async function* runSmartLoopStream(
     /* -------------------------------------------------------------- */
     state.iterations++;
 
-    yield { type: "iteration_start" as const, iteration: state.iterations, estimatedTokens: estimateTokens(state.messages), timestamp: Date.now() };
+    yield { type: "iteration_start" as const, iteration: state.iterations, estimatedTokens: estimateStateTokens(), timestamp: Date.now() };
 
     let executionResult: Awaited<ReturnType<typeof executeModelAndTools>>;
 
@@ -538,6 +576,8 @@ export async function* runSmartLoopStream(
         config.streaming,
         { maxTokens: state.maxOutputTokens },
         config.llmTimeout,
+        getVisibleTools(),
+        authorizeNativeDisclosure,
       );
     } catch (error) {
       /* ------------------------------------------------------------ */
@@ -559,6 +599,8 @@ export async function* runSmartLoopStream(
             config.streaming,
             { maxTokens: state.maxOutputTokens },
             config.llmTimeout,
+            getVisibleTools(),
+            authorizeNativeDisclosure,
           );
           // Fallback succeeded — continue to result processing below
         } catch (fallbackError) {
@@ -627,12 +669,12 @@ export async function* runSmartLoopStream(
         // Phase 2: Fall back to aggressive reactiveCompact
         const MAX_REACTIVE_RETRIES = 2;
         if (state.compaction.reactiveCompactRetries < MAX_REACTIVE_RETRIES) {
-          const preReactiveTokens = estimateTokens(state.messages);
+          const preReactiveTokens = estimateStateTokens();
           state.messages = reactiveCompact(state.messages);
           state.compaction.reactiveCompactRetries++;
           state.microcompactCache.clear();
           state.seenMemoryHashes.clear();
-          yield { type: "compression" as const, strategy: "reactive" as const, tokensBefore: preReactiveTokens, tokensAfter: estimateTokens(state.messages), timestamp: Date.now() };
+          yield { type: "compression" as const, strategy: "reactive" as const, tokensBefore: preReactiveTokens, tokensAfter: estimateStateTokens(), timestamp: Date.now() };
           yield { type: "error_recovery" as const, strategy: "reactive_compact", details: "Context limit recovered via reactive compact", timestamp: Date.now() };
           state.continuationPrompt = applyContinuationPrompt("reactive_compact_retry");
           continue;
@@ -688,6 +730,11 @@ export async function* runSmartLoopStream(
       durationMs: Date.now() - llmStartTime,
       timestamp: Date.now(),
     };
+
+    state.toolCatalog = catalog.snapshot();
+    for (const event of catalog.takeEvents()) {
+      yield toAgentCatalogEvent(event, state.iterations);
+    }
 
     /* -------------------------------------------------------------- */
     /* 2e. TOKEN BUDGET MANAGEMENT                                    */
@@ -803,7 +850,16 @@ export async function* runSmartLoopStream(
           // Track retries by tool name + iteration + requestId for call-specific context
           const retryKey = `${record.tool}_iter${state.iterations}_${record.requestId ?? ""}`;
           const retryCount = state.toolRetries.get(retryKey) ?? 0;
-          if (retryCount < MAX_TOOL_RETRIES && record.tool !== "activate_skill" && record.tool !== "read_persisted_result") {
+          const errorCode =
+            record.result && typeof record.result === "object"
+              ? (record.result as { code?: unknown }).code
+              : undefined;
+          const retryableTool =
+            record.tool !== "activate_skill" &&
+            record.tool !== "read_persisted_result" &&
+            record.tool !== "discover_tools" &&
+            errorCode !== "TOOL_NOT_DISCLOSED";
+          if (retryCount < MAX_TOOL_RETRIES && retryableTool) {
             // This error is retriable — don't expose yet
             retriableRecords.push(record);
             state.toolRetries.set(retryKey, retryCount + 1);
@@ -988,7 +1044,7 @@ export async function* runSmartLoopStream(
             iteration: state.iterations,
             messages: state.messages,
             toolCalls: state.toolCalls,
-            estimatedTokens: estimateTokens(state.messages),
+            estimatedTokens: estimateStateTokens(),
           });
         } catch {
           // afterIteration hook failure is non-fatal
@@ -1072,7 +1128,7 @@ export async function* runSmartLoopStream(
           iteration: state.iterations,
           messages: [...state.messages, { role: "assistant", content: outcome.content }],
           toolCalls: state.toolCalls,
-          estimatedTokens: estimateTokens(state.messages),
+          estimatedTokens: estimateStateTokens(),
         });
       } catch {
         // Non-fatal

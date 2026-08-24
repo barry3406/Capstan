@@ -706,6 +706,7 @@ describe("Streaming: memory enrichment", () => {
       },
       tools: [tool],
       memory: { store: memoryBackend, scope },
+      loopGuard: { enabled: false },
       maxIterations: 10,
     });
 

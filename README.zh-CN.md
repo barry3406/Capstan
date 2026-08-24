@@ -255,7 +255,7 @@ export const requireAuth = definePolicy({
 
 ## 面向 Agent — 智能运行时
 
-`@zauso-ai/capstan-ai` 中的 `createSmartAgent()` 提供了生产级自主 Agent 运行时。不是 LLM 的简单封装 — 而是一个完整的执行环境，具备 12 项工程特性，将玩具演示和真实世界的 Agent 区分开来。
+`@zauso-ai/capstan-ai` 中的 `createSmartAgent()` 提供了生产级自主 Agent 运行时。不是 LLM 的简单封装 — 而是一个完整的执行环境，具备 13 项工程特性，将玩具演示和真实世界的 Agent 区分开来。
 
 与其他 Agent 框架的关键区别：这些 Agent 可以操作人类使用的同一个 Capstan Web 应用。同一套 API，同一套鉴权，同一组策略 — 无需适配层。
 
@@ -351,6 +351,14 @@ createSmartAgent({
 ### 12. 提示词组合
 
 分层提示词系统，支持 `prepend`、`append` 和 `replace_base` 位置。动态层可以根据迭代次数、可用工具和记忆状态注入上下文。
+
+### 13. 渐进式工具披露
+
+大型工具目录会按 schema token 预算从全量内联自动切换为按需发现。
+`discover_tools` 只返回紧凑匹配，隐藏工具在成功披露前不能执行。OpenAI
+和 Anthropic 的原生工具搜索复用同一套预算与执行门禁；checkpoint 保存只增
+不减的可见工具集合。MCP 客户端会拉取完整分页目录，并在工具变更通知后发布
+完整快照。详见[渐进式工具披露](docs/progressive-tool-disclosure.md)。
 
 ### 技能层
 
@@ -534,7 +542,7 @@ app/
 
 ## 工程成熟度
 
-`createSmartAgent` 运行时包含 12 项生产特性，这些特性决定了演示与可部署系统之间的差距：
+`createSmartAgent` 运行时包含 13 项生产特性，这些特性决定了演示与可部署系统之间的差距：
 
 1. **响应式 4 层上下文压缩** — snip、microcompact、autocompact、reactive compact
 2. **模型降级与 Thinking 剥离** — 失败时自动切换，对非思考模型剥离 thinking 块
@@ -548,6 +556,7 @@ app/
 10. **生命周期钩子** — `beforeToolCall`、`afterToolCall`、`afterIteration`、`onRunComplete`、`getControlState`
 11. **并发工具执行** — `isConcurrencySafe` 标志，可配置 `maxConcurrency`
 12. **分层提示词组合** — `prepend`、`append`、`replace_base` 与动态层
+13. **渐进式工具披露** — schema token 预算、确定性发现、执行隔离、Provider 原生搜索与可恢复目录状态
 
 ---
 
@@ -557,7 +566,7 @@ Capstan 发布 12 个工作空间包：
 
 | 包名 | 描述 |
 |------|------|
-| `@zauso-ai/capstan-ai` | **智能 Agent 运行时**：`createSmartAgent` 带 4 层压缩、模型降级、工具校验/超时、LLM 看门狗、Token 预算、工具结果预算、错误隐匿、生命周期钩子。`defineSkill` 技能层。自我进化引擎含 `SqliteEvolutionStore`。持久化 `createHarness` 含浏览器/文件系统沙箱。另有：`think`/`generate`、作用域记忆、任务编排。 |
+| `@zauso-ai/capstan-ai` | **智能 Agent 运行时**：`createSmartAgent` 带渐进式工具披露、4 层压缩、模型降级、工具校验/超时、LLM 看门狗、Token 预算、工具结果预算、错误隐匿、生命周期钩子。`defineSkill` 技能层。自我进化引擎含 `SqliteEvolutionStore`。持久化 `createHarness` 含浏览器/文件系统沙箱。另有：`think`/`generate`、作用域记忆、任务编排。 |
 | `@zauso-ai/capstan-core` | Hono 服务器、`defineAPI`、`defineMiddleware`、`definePolicy`、审批工作流、8 步验证器 |
 | `@zauso-ai/capstan-agent` | `CapabilityRegistry`、MCP 服务器（stdio + Streamable HTTP）、MCP 客户端、A2A 适配器（SSE）、OpenAPI 生成器、LangChain 集成 |
 | `@zauso-ai/capstan-db` | Drizzle ORM、`defineModel`、字段/关系辅助函数、迁移、自动 CRUD、向量字段、`defineEmbedding`、混合搜索 |

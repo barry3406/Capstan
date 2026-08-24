@@ -132,6 +132,21 @@ export function assertValidAgentCheckpoint(
       }
     }
   }
+
+  if (checkpoint.toolCatalog != null) {
+    if (!isPlainObject(checkpoint.toolCatalog)) {
+      throw new Error(`${context} is invalid: toolCatalog must be an object`);
+    }
+    if (typeof checkpoint.toolCatalog.version !== "string" || !checkpoint.toolCatalog.version.trim()) {
+      throw new Error(`${context} is invalid: toolCatalog.version must be a non-empty string`);
+    }
+    if (
+      !Array.isArray(checkpoint.toolCatalog.disclosed) ||
+      checkpoint.toolCatalog.disclosed.some((name: unknown) => typeof name !== "string" || !name.trim())
+    ) {
+      throw new Error(`${context} is invalid: toolCatalog.disclosed must contain tool names`);
+    }
+  }
 }
 
 export function getCheckpointStage(checkpoint: AgentCheckpoint): string {

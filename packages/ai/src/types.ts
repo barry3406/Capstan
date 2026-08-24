@@ -14,9 +14,9 @@ export interface LLMMessage {
   content: string | LLMContentPart[];
 }
 
-export interface LLMResponse { content: string; model: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined; finishReason?: string | undefined; toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] | undefined; }
+export interface LLMResponse { content: string; model: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined; finishReason?: string | undefined; toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] | undefined; disclosedTools?: string[] | undefined; }
 /** Native tool calls are carried ONLY on the terminal `done:true` chunk. */
-export interface LLMStreamChunk { content: string; done: boolean; finishReason?: string | undefined; toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] | undefined; }
+export interface LLMStreamChunk { content: string; done: boolean; finishReason?: string | undefined; toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] | undefined; disclosedTools?: string[] | undefined; }
 
 /** Tool spec passed to the LLM provider. The provider can use this to
  * advertise native function calling (OpenAI / Anthropic) so the model
@@ -25,6 +25,10 @@ export interface LLMToolSpec {
   name: string;
   description: string;
   parameters?: Record<string, unknown> | undefined;
+  /** Provider hint: keep this schema out of the initial model context. */
+  deferLoading?: boolean | undefined;
+  /** Stable grouping used by catalogs and provider-native search. */
+  namespace?: string | undefined;
 }
 
 export interface LLMOptions {
@@ -37,6 +41,8 @@ export interface LLMOptions {
   /** Tools available this turn. Native-function-call providers will
    * present them; text-only providers may ignore. */
   tools?: LLMToolSpec[] | undefined;
+  /** Hidden schemas available only to providers with native tool search. */
+  deferredTools?: LLMToolSpec[] | undefined;
 }
 export interface LLMProvider {
   name: string;
@@ -47,6 +53,8 @@ export interface LLMProvider {
    * The loop uses this to DEFER tool dispatch to stream-end for native providers,
    * while text-only providers (flag absent) keep mid-stream eager dispatch. */
   nativeToolCalls?: "terminal" | undefined;
+  /** Provider-native search can receive schemas without initially loading them. */
+  nativeToolSearch?: "openai" | "anthropic" | undefined;
 }
 
 // === Think/Generate (unchanged) ===
@@ -102,6 +110,11 @@ export interface AgentTool {
   name: string;
   description: string;
   parameters?: Record<string, unknown> | undefined;
+  disclosure?: {
+    mode?: "always" | "deferred" | undefined;
+    namespace?: string | undefined;
+    keywords?: string[] | undefined;
+  } | undefined;
   isConcurrencySafe?: boolean | undefined;
   failureMode?: "soft" | "hard" | undefined;
   execute(args: Record<string, unknown>): Promise<unknown>;
@@ -173,6 +186,11 @@ export interface AgentCheckpoint {
     reactiveCompactRetries: number;
     tokenEscalations: number;
   };
+  /** Restores the append-only visible tool set for deterministic resumes. */
+  toolCatalog?: {
+    version: string;
+    disclosed: string[];
+  } | undefined;
   pendingApproval?: { kind: "tool" | "task"; tool: string; args: unknown; reason: string } | undefined;
 }
 
@@ -261,7 +279,18 @@ export interface ToolClearConfig { keep?: number | undefined; enabled?: boolean 
 export interface StreamingExecutorConfig { maxConcurrency: number; }
 
 // === Tool Catalog Config ===
-export interface ToolCatalogConfig { deferThreshold: number; }
+export interface ToolCatalogConfig {
+  /** `auto` switches based on schema tokens; `inline` preserves legacy behavior. */
+  mode?: "auto" | "inline" | "progressive" | undefined;
+  /** Initial schema budget used by `auto` mode. Default: 4096 tokens. */
+  inlineSchemaTokenLimit?: number | undefined;
+  /** Maximum compact results returned by one discovery. Default: 5, max: 10. */
+  maxSearchResults?: number | undefined;
+  /** Maximum total schema tokens disclosed during a run. Default: 8192. */
+  maxDisclosedSchemaTokens?: number | undefined;
+  /** @deprecated Use `mode` and `inlineSchemaTokenLimit`. */
+  deferThreshold?: number | undefined;
+}
 
 // === Token Budget ===
 export interface TokenBudgetConfig {
@@ -383,6 +412,9 @@ export type AgentEvent =
   | { type: "tool_call_start"; tool: string; args: unknown; iteration: number; timestamp: number }
   | { type: "tool_call_end"; tool: string; args: unknown; result: unknown; status: "success" | "error"; durationMs?: number; iteration: number; timestamp: number }
   | { type: "skill_activated"; skill: string; iteration: number; timestamp: number }
+  | { type: "tool_search"; query: string; matches: string[]; iteration: number; native: boolean; timestamp: number }
+  | { type: "tools_disclosed"; tools: string[]; schemaTokens: number; iteration: number; timestamp: number }
+  | { type: "catalog_changed"; previousVersion: string; version: string; retained: string[]; timestamp: number }
   | { type: "compression"; strategy: "snip" | "microcompact" | "autocompact" | "reactive" | "tool_clear"; tokensBefore: number; tokensAfter: number; timestamp: number }
   | { type: "memory_enrichment"; memoriesInjected: number; iteration: number; timestamp: number }
   | { type: "token_budget_warning"; usedPercent: number; iteration: number; timestamp: number }

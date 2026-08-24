@@ -477,7 +477,7 @@ describe("CSRF Protection", () => {
     if (opts.csrfHeader) headers["x-csrf-token"] = opts.csrfHeader;
     if (opts.authorization) headers["authorization"] = opts.authorization;
 
-    const responseHeaders = new Map<string, string>();
+    const responseHeaders = new Headers();
 
     const c = {
       req: {
@@ -493,11 +493,12 @@ describe("CSRF Protection", () => {
           headers: { "Content-Type": "application/json" },
         });
       },
-      header: (name: string, value: string) => {
-        responseHeaders.set(name, value);
+      header: (name: string, value: string, options?: { append?: boolean }) => {
+        if (options?.append) responseHeaders.append(name, value);
+        else responseHeaders.set(name, value);
       },
       res: {
-        headers: new Headers(),
+        headers: responseHeaders,
       },
       _responseHeaders: responseHeaders,
     };
